@@ -4,8 +4,10 @@
 //! the child keeps foil's stdio, environment, terminal and process group, and
 //! foil exits exactly the way the child did. Signals sent to foil (e.g. by
 //! `docker stop` or a CI runner) are relayed to the child through a pidfd.
-//! foil is a child subreaper, so when the command exits, every descendant it
-//! left behind is killed and reaped before foil returns.
+//! When the user has a delegated cgroup, the command runs in its own cgroup
+//! "box" (see `cgroup.rs`), and one write to `cgroup.kill` stops everything
+//! it started. foil is also a child subreaper, so either way every leftover
+//! descendant is killed and reaped before foil returns.
 //!
 //! Invariant: the calling process must stay single-threaded while
 //! `supervise` runs. Signals are blocked only on the calling thread, and
@@ -19,6 +21,8 @@ use std::os::unix::process::CommandExt;
 use std::process::Command;
 
 use libc::{c_int, c_long, pid_t};
+
+use crate::cgroup::{self, Cgroup};
 
 /// Signals foil relays to the child. SIGCHLD is watched too, for reaping.
 const FORWARDED: [c_int; 7] = [
@@ -42,6 +46,8 @@ pub struct Outcome {
     pub termination: Termination,
     /// Descendants other than the command itself that foil reaped.
     pub orphans_reaped: usize,
+    /// Whether the command ran inside its own cgroup box.
+    pub contained: bool,
 }
 
 /// Run `argv` as a child, relay signals to it, and wait for it and all of
@@ -64,6 +70,10 @@ pub fn supervise(argv: &[OsString]) -> io::Result<Outcome> {
     // SAFETY: signalfd just returned this descriptor and nothing else owns it.
     let sfd = unsafe { OwnedFd::from_raw_fd(sfd) };
 
+    // Created before the child so that it is born straight into the box.
+    let mut cgroup = Cgroup::create();
+    let entry = cgroup.as_ref().map(Cgroup::entry);
+
     let parent = unsafe { libc::getpid() };
     let empty = sigset(&[]);
     let mut cmd = Command::new(program);
@@ -72,6 +82,12 @@ pub fn supervise(argv: &[OsString]) -> io::Result<Outcome> {
     // makes async-signal-safe calls (no allocation, no locks).
     unsafe {
         cmd.pre_exec(move || {
+            // Join the box first, so everything the command starts is inside.
+            // On failure the child runs uncontained; the parent sees it via
+            // `contains` and subreaper cleanup still applies.
+            if let Some(procs) = &entry {
+                let _ = cgroup::enter(procs);
+            }
             // The signal mask and ignored dispositions survive exec; undo ours.
             check(libc::pthread_sigmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut()))?;
             libc::signal(libc::SIGPIPE, libc::SIG_DFL);
@@ -85,13 +101,21 @@ pub fn supervise(argv: &[OsString]) -> io::Result<Outcome> {
         });
     }
     let pid = cmd.spawn()?.id() as pid_t;
+    let contained = cgroup.as_ref().is_some_and(|cg| cg.contains(pid as u32));
 
-    // Drain runs even if waiting failed, so an error never leaks the child.
+    // Cleanup runs even if waiting failed, so an error never leaks the child.
     let result = wait_for_exit(pid, &sfd);
+    if let Some(cg) = &mut cgroup {
+        // One write stops everything in the box, even processes we may not signal.
+        let _ = cg.kill();
+    }
     let drained = drain_descendants();
+    // Everything is reaped, so the box is empty; dropping it removes it.
+    drop(cgroup);
     result.map(|(termination, reaped)| Outcome {
         termination,
         orphans_reaped: reaped + drained,
+        contained,
     })
 }
 

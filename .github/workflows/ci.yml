@@ -8,4 +8,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --all-targets
+
+      # The runner's own cgroup is not delegated, so this run exercises the
+      # subreaper-only fallback (cgroup tests skip themselves).
+      - name: Test (fallback, no cgroup box)
+        run: cargo test --all-targets
+
+      # Start a systemd user manager so the runner gets a delegated cgroup.
+      - name: Enable a systemd user session
+        run: |
+          sudo loginctl enable-linger "$USER"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          for i in $(seq 30); do [ -S "/run/user/$(id -u)/bus" ] && break; sleep 1; done
+
+      - name: Test (cgroup box required)
+        run: systemd-run --user --scope -q env FOIL_REQUIRE_CGROUP=1 cargo test --all-targets

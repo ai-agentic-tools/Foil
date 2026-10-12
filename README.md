@@ -17,7 +17,7 @@ foil commit fix-login              # apply it (or: foil abort fix-login)
 ```
 
 No root, no daemon, no container image, no copy: one static 1 MB binary on
-plain Linux.
+plain Linux. `./demo.sh` shows a misbehaving "agent" being contained, in two minutes.
 
 ## Why
 

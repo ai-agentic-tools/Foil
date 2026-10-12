@@ -71,8 +71,7 @@ impl Limits {
             cmd.args(["-p", &format!("MemoryMax={bytes}"), "-p", "MemorySwapMax=0"]);
         }
         if let Some(cpus) = self.cpus {
-            // systemd takes a percentage of one CPU; round up so 0.001 is not 0.
-            cmd.args(["-p", &format!("CPUQuota={}%", (cpus * 100.0).ceil() as u64)]);
+            cmd.args(["-p", &format!("CPUQuota={}%", cpu_quota_percent(cpus))]);
         }
         if let Some(pids) = self.pids {
             cmd.args(["-p", &format!("TasksMax={pids}")]);
@@ -146,6 +145,13 @@ fn user_session() -> io::Result<()> {
     }
 }
 
+/// `--cpus` as systemd's CPUQuota percentage of one CPU. Rounded to the
+/// nearest percent (1.1 * 100.0 is 110.00000000000001 in floating point, so
+/// rounding up would give 111), but never below 1 so a tiny limit is not 0.
+fn cpu_quota_percent(cpus: f64) -> u64 {
+    ((cpus * 100.0).round() as u64).max(1)
+}
+
 /// Parse a memory size: bytes, or a number with K, M, G or T (powers of 1024).
 pub fn parse_size(text: &str) -> Option<u64> {
     let text = text.trim();
@@ -168,7 +174,15 @@ pub fn parse_size(text: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_size;
+    use super::{cpu_quota_percent, parse_size};
+
+    #[test]
+    fn cpu_quotas() {
+        assert_eq!(cpu_quota_percent(1.1), 110);
+        assert_eq!(cpu_quota_percent(0.5), 50);
+        assert_eq!(cpu_quota_percent(2.0), 200);
+        assert_eq!(cpu_quota_percent(0.001), 1);
+    }
 
     #[test]
     fn sizes() {

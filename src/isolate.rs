@@ -101,10 +101,10 @@ pub struct Plan {
 impl Plan {
     /// The plan for these options, or `None` when they ask for no isolation.
     pub fn new(options: &Options, overlay: Option<Overlay>) -> io::Result<Option<Plan>> {
+        if !options.allow_write.is_empty() && !options.protect {
+            return Err(invalid("--allow-write only makes sense with --protect".to_owned()));
+        }
         if overlay.is_none() && !options.protect && !options.no_network {
-            if !options.allow_write.is_empty() {
-                return Err(invalid("--allow-write only makes sense with --protect".to_owned()));
-            }
             return Ok(None);
         }
         let mut writable = Vec::new();

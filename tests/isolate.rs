@@ -109,9 +109,12 @@ fn protect_with_a_branch_lets_the_command_change_only_the_branch() {
 
 #[test]
 fn allow_write_needs_protect() {
-    let out = run(&["--allow-write", "/tmp"], "true");
-    assert_eq!(out.status.code(), Some(125));
-    assert!(text(&out.stderr).contains("--protect"), "{}", text(&out.stderr));
+    // Also alongside other isolation, where it used to be silently ignored.
+    for options in [&["--allow-write", "/tmp"][..], &["--no-network", "--allow-write", "/tmp"][..]] {
+        let out = run(options, "true");
+        assert_eq!(out.status.code(), Some(125), "{options:?}");
+        assert!(text(&out.stderr).contains("--protect"), "{}", text(&out.stderr));
+    }
 }
 
 #[test]

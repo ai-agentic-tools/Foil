@@ -164,6 +164,8 @@ fn own_cgroup() -> Option<String> {
     text.lines().find_map(|line| line.strip_prefix("0::")).map(str::to_owned)
 }
 
+// f_type's integer type differs between architectures, hence the cast below.
+#[allow(clippy::unnecessary_cast)]
 fn is_cgroup2(dir: &Path) -> bool {
     let Ok(path) = CString::new(dir.as_os_str().as_bytes()) else {
         return false;

@@ -17,6 +17,27 @@ fn spawn_true(c: &mut Criterion) {
                 .unwrap()
         })
     });
+    // A run inside a branch: user + mount namespaces and an overlay mount.
+    // Needs unprivileged user namespaces; the workspace lives in the temp dir.
+    let root = std::env::temp_dir().join(format!("foil-bench-{}", std::process::id()));
+    std::fs::create_dir_all(root.join("ws")).unwrap();
+    let run_in_branch = || {
+        Command::new(env!("CARGO_BIN_EXE_foil"))
+            .args(["run", "--branch", "bench", "--", "true"])
+            .current_dir(root.join("ws"))
+            .env("FOIL_HOME", root.join("home"))
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+    };
+    // Timing a failure would be meaningless: skip where branches are blocked.
+    if run_in_branch().success() {
+        group.bench_function("foil_run_branch", |b| b.iter(run_in_branch));
+    } else {
+        eprintln!("skipped foil_run_branch: branches unavailable here");
+    }
+    let _ = Command::new("chmod").args(["-R", "u+rwx"]).arg(&root).status();
+    let _ = std::fs::remove_dir_all(&root);
     group.finish();
 }
 

@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 
 use libc::{c_int, c_long, pid_t};
 
+use crate::branch::{self, Prepared};
 use crate::cgroup::{self, Cgroup};
 
 /// Signals foil relays to the child. SIGCHLD is watched too, for reaping.
@@ -62,8 +63,9 @@ pub struct Outcome {
 }
 
 /// Run `argv` as a child, relay signals to it, and wait for it and all of
-/// its descendants to be gone.
-pub fn supervise(argv: &[OsString]) -> io::Result<Outcome> {
+/// its descendants to be gone. With `branch`, the command runs inside that
+/// workspace branch (see `branch.rs`).
+pub fn supervise(argv: &[OsString], branch: Option<&Prepared>) -> io::Result<Outcome> {
     let (program, args) = argv
         .split_first()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no command given"))?;
@@ -88,6 +90,7 @@ pub fn supervise(argv: &[OsString]) -> io::Result<Outcome> {
 
     let parent = unsafe { libc::getpid() };
     let empty = sigset(&[]);
+    let in_branch = branch.cloned();
     let mut cmd = Command::new(program);
     cmd.args(args);
     // SAFETY: the closure runs in the forked child before exec and only
@@ -99,6 +102,10 @@ pub fn supervise(argv: &[OsString]) -> io::Result<Outcome> {
             // `contains` and subreaper cleanup still applies.
             if let Some(procs) = &entry {
                 let _ = cgroup::enter(procs);
+            }
+            // Then the branch: from here on, the workspace is the overlay.
+            if let Some(prepared) = &in_branch {
+                branch::enter(prepared)?;
             }
             // The signal mask and ignored dispositions survive exec; undo ours.
             check(libc::pthread_sigmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut()))?;
@@ -112,7 +119,13 @@ pub fn supervise(argv: &[OsString]) -> io::Result<Outcome> {
             Ok(())
         });
     }
-    let pid = cmd.spawn()?.id() as pid_t;
+    let pid = match cmd.spawn() {
+        Ok(child) => child.id() as pid_t,
+        // Entering the branch and running the command report errors the same
+        // way; a throwaway test child tells the two apart.
+        Err(err) if branch.is_some_and(|b| !branch::can_enter(b)) => return Err(branch::explain(err)),
+        Err(err) => return Err(err),
+    };
     let contained = cgroup.as_ref().is_some_and(|cg| cg.contains(pid as u32));
 
     // Cleanup runs even if waiting failed, so an error never leaks the child.
@@ -441,7 +454,7 @@ fn sigset(signals: &[c_int]) -> libc::sigset_t {
 }
 
 /// Map the `-1 + errno` convention to `io::Result`.
-fn cvt(rc: c_int) -> io::Result<c_int> {
+pub(crate) fn cvt(rc: c_int) -> io::Result<c_int> {
     if rc == -1 {
         Err(io::Error::last_os_error())
     } else {

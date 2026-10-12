@@ -57,7 +57,7 @@ impl Cgroup {
         self.procs.clone()
     }
 
-    /// Whether `pid` is inside this box.
+    /// Whether `pid` is inside this box or a cgroup nested inside it.
     pub fn contains(&self, pid: u32) -> bool {
         let Ok(rel) = self.dir.strip_prefix(CGROUP_ROOT) else {
             return false;
@@ -65,8 +65,22 @@ impl Cgroup {
         let want = Path::new("/").join(rel);
         std::fs::read_to_string(format!("/proc/{pid}/cgroup")).is_ok_and(|text| {
             text.lines()
-                .any(|line| line.strip_prefix("0::").is_some_and(|p| Path::new(p) == want))
+                .any(|line| line.strip_prefix("0::").is_some_and(|p| Path::new(p).starts_with(&want)))
         })
+    }
+
+    /// Whether any live process is left in the box or its nested cgroups.
+    /// A process stops counting before its parent gets SIGCHLD for it.
+    pub fn is_populated(&self) -> bool {
+        std::fs::read_to_string(self.dir.join("cgroup.events"))
+            .is_ok_and(|text| text.lines().any(|line| line == "populated 1"))
+    }
+
+    /// Every process in the box and its nested cgroups, at the moment of reading.
+    pub fn pids(&self) -> Vec<u32> {
+        let mut pids = Vec::new();
+        collect_pids(&self.dir, &mut pids);
+        pids
     }
 
     /// SIGKILL every process in the box and in any cgroup nested inside it.
@@ -105,6 +119,17 @@ pub fn enter(procs: &CString) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+fn collect_pids(dir: &Path, pids: &mut Vec<u32>) {
+    if let Ok(text) = std::fs::read_to_string(dir.join("cgroup.procs")) {
+        pids.extend(text.lines().filter_map(|p| p.parse::<u32>().ok()));
+    }
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            collect_pids(&entry.path(), pids);
+        }
+    }
 }
 
 fn kill_and_remove(dir: &Path) -> io::Result<()> {

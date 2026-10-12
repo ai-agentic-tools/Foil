@@ -7,18 +7,22 @@
 //! When the user has a delegated cgroup, the command runs in its own cgroup
 //! "box" (see `cgroup.rs`), and one write to `cgroup.kill` stops everything
 //! it started. foil is also a child subreaper, so either way every leftover
-//! descendant is killed and reaped before foil returns.
+//! descendant is killed and reaped before foil returns. Leftovers first get a
+//! SIGTERM and a short grace period (`FOIL_GRACE_MS`, default 1000) to save
+//! their work and exit on their own; SIGKILL is only for what is still left.
 //!
 //! Invariant: the calling process must stay single-threaded while
 //! `supervise` runs. Signals are blocked only on the calling thread, and
 //! orphans are reparented to (and listed under) the main thread.
 
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::io;
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use libc::{c_int, c_long, pid_t};
 
@@ -34,6 +38,13 @@ const FORWARDED: [c_int; 7] = [
     libc::SIGUSR2,
     libc::SIGWINCH,
 ];
+
+/// How long leftovers get between SIGTERM and SIGKILL, unless FOIL_GRACE_MS says otherwise.
+const DEFAULT_GRACE: Duration = Duration::from_millis(1000);
+
+/// The longest single wait in the grace period. Normally a SIGCHLD wakes foil
+/// first; this only matters if a box member's exit is reported elsewhere.
+const GRACE_TICK: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Termination {
@@ -69,6 +80,7 @@ pub fn supervise(argv: &[OsString]) -> io::Result<Outcome> {
     let sfd = cvt(unsafe { libc::signalfd(-1, &mask, libc::SFD_CLOEXEC | libc::SFD_NONBLOCK) })?;
     // SAFETY: signalfd just returned this descriptor and nothing else owns it.
     let sfd = unsafe { OwnedFd::from_raw_fd(sfd) };
+    let grace = grace_from_env();
 
     // Created before the child so that it is born straight into the box.
     let mut cgroup = Cgroup::create();
@@ -105,6 +117,11 @@ pub fn supervise(argv: &[OsString]) -> io::Result<Outcome> {
 
     // Cleanup runs even if waiting failed, so an error never leaks the child.
     let result = wait_for_exit(pid, &sfd);
+    // After an error, skip the grace period and go straight to SIGKILL.
+    let spared = match result {
+        Ok(_) => grace_period(cgroup.as_ref(), &sfd, grace),
+        Err(_) => 0,
+    };
     if let Some(cg) = &mut cgroup {
         // One write stops everything in the box, even processes we may not signal.
         let _ = cg.kill();
@@ -114,7 +131,7 @@ pub fn supervise(argv: &[OsString]) -> io::Result<Outcome> {
     drop(cgroup);
     result.map(|(termination, reaped)| Outcome {
         termination,
-        orphans_reaped: reaped + drained,
+        orphans_reaped: reaped + spared + drained,
         contained,
     })
 }
@@ -164,6 +181,115 @@ fn wait_for_exit(pid: pid_t, sfd: &OwnedFd) -> io::Result<(Termination, usize)> 
     }
 }
 
+/// FOIL_GRACE_MS as a duration; 0 means SIGKILL leftovers at once.
+fn grace_from_env() -> Duration {
+    let Some(raw) = std::env::var_os("FOIL_GRACE_MS") else {
+        return DEFAULT_GRACE;
+    };
+    match raw.to_str().and_then(|ms| ms.trim().parse().ok()) {
+        Some(ms) => Duration::from_millis(ms),
+        None => {
+            eprintln!("foil: ignoring FOIL_GRACE_MS={raw:?}: not a whole number of milliseconds");
+            DEFAULT_GRACE
+        }
+    }
+}
+
+/// Ask every leftover process to exit with SIGTERM, then wait up to `grace`
+/// for them to do so, reaping as they go. Returns the number reaped.
+///
+/// The wait ends early when nothing is left, when no leftover accepted the
+/// SIGTERM (e.g. all are root-owned, so warning them is pointless), or when
+/// foil itself is told to stop (the caller is in a hurry). Orphans adopted
+/// during the wait get their own SIGTERM. Whatever is still running at the
+/// end is SIGKILLed by the caller.
+fn grace_period(cgroup: Option<&Cgroup>, sfd: &OwnedFd, grace: Duration) -> usize {
+    let me = unsafe { libc::getpid() };
+    let mut reaped = reap_leftovers();
+    let left = |reaped: &mut usize| {
+        *reaped += reap_leftovers();
+        cgroup.is_some_and(Cgroup::is_populated) || !children_of(me).is_empty()
+    };
+    if grace.is_zero() || !left(&mut reaped) {
+        return reaped;
+    }
+    let mut warned = HashSet::new();
+    if terminate(cgroup, me, &mut warned) == 0 {
+        return reaped;
+    }
+    // None: a grace too long to represent, i.e. wait as long as it takes.
+    let deadline = Instant::now().checked_add(grace);
+    while left(&mut reaped) {
+        let wait = match deadline {
+            Some(deadline) => deadline.saturating_duration_since(Instant::now()).min(GRACE_TICK),
+            None => GRACE_TICK,
+        };
+        if wait.is_zero() {
+            break;
+        }
+        let mut fds = [pollin(sfd)];
+        let ms = wait.as_nanos().div_ceil(1_000_000) as c_int;
+        if unsafe { libc::poll(fds.as_mut_ptr(), 1, ms) } == -1
+            && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted
+        {
+            break;
+        }
+        if fds[0].revents & libc::POLLIN != 0 {
+            let Ok(signals) = read_signals(sfd) else { break };
+            let hurry = [libc::SIGHUP, libc::SIGINT, libc::SIGQUIT, libc::SIGTERM];
+            if signals.iter().any(|s| hurry.contains(&(s.ssi_signo as c_int))) {
+                break;
+            }
+        }
+        terminate(cgroup, me, &mut warned);
+    }
+    reaped
+}
+
+/// SIGTERM each leftover not in `warned` yet; returns how many accepted it.
+/// A process gets one SIGTERM only: some programs treat a second as "quit
+/// now, skip the clean-up". (A PID recycled into a new leftover is skipped;
+/// SIGKILL still gets it.)
+fn terminate(cgroup: Option<&Cgroup>, me: pid_t, warned: &mut HashSet<pid_t>) -> usize {
+    let mut sent = 0;
+    if let Some(cg) = cgroup {
+        for pid in cg.pids() {
+            if warned.insert(pid as pid_t) && terminate_listed(cg, pid) {
+                sent += 1;
+            }
+        }
+    }
+    // Our own unreaped children: their PIDs cannot be recycled, so plain kill is safe.
+    for child in children_of(me) {
+        if warned.insert(child) && unsafe { libc::kill(child, libc::SIGTERM) } == 0 {
+            sent += 1;
+        }
+    }
+    sent
+}
+
+/// SIGTERM `pid`, which the box listed but which foil may not own: it may
+/// have died and its PID been reused since the listing. The pidfd pins one
+/// exact process; if the PID now belongs to a process outside the box, the
+/// check fails, and if the pinned process is gone, the signal gets ESRCH.
+fn terminate_listed(cg: &Cgroup, pid: u32) -> bool {
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as c_long, 0 as c_long) };
+    if fd == -1 {
+        return false;
+    }
+    // SAFETY: pidfd_open returned a new descriptor that we now own.
+    let pidfd = unsafe { OwnedFd::from_raw_fd(fd as c_int) };
+    cg.contains(pid) && send_signal(&pidfd, libc::SIGTERM) == 0
+}
+
+/// Reap every exited child without blocking; returns how many. PID 0 never
+/// matches a real child, so every one counts as a leftover.
+fn reap_leftovers() -> usize {
+    let mut reaped = 0;
+    let _ = reap_exited(0, &mut None, &mut reaped);
+    reaped
+}
+
 fn pollin(fd: &OwnedFd) -> libc::pollfd {
     libc::pollfd {
         fd: fd.as_raw_fd(),
@@ -189,17 +315,7 @@ fn read_signals(sfd: &OwnedFd) -> io::Result<Vec<libc::signalfd_siginfo>> {
 }
 
 fn forward(pidfd: &OwnedFd, sig: c_int) -> io::Result<()> {
-    // Signalling through the pidfd can never hit a recycled PID.
-    let rc = unsafe {
-        libc::syscall(
-            libc::SYS_pidfd_send_signal,
-            pidfd.as_raw_fd() as c_long,
-            sig as c_long,
-            0 as c_long,
-            0 as c_long,
-        )
-    };
-    if rc == -1 {
+    if send_signal(pidfd, sig) == -1 {
         let err = io::Error::last_os_error();
         // ESRCH: the child already exited; the next reap will notice.
         if err.raw_os_error() != Some(libc::ESRCH) {
@@ -207,6 +323,20 @@ fn forward(pidfd: &OwnedFd, sig: c_int) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Signal the process behind `pidfd`; returns 0, or -1 with errno set.
+/// Signalling through a pidfd can never hit a recycled PID.
+fn send_signal(pidfd: &OwnedFd, sig: c_int) -> c_long {
+    unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            pidfd.as_raw_fd() as c_long,
+            sig as c_long,
+            0 as c_long,
+            0 as c_long,
+        )
+    }
 }
 
 /// Reap every exited child without blocking, recording the main child's status.

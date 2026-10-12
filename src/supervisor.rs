@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use libc::{c_int, c_long, pid_t};
 
-use crate::branch::{self, Prepared};
+use crate::isolate::{self, Plan};
 use crate::cgroup::{self, Cgroup};
 
 /// Signals foil relays to the child. SIGCHLD is watched too, for reaping.
@@ -63,9 +63,9 @@ pub struct Outcome {
 }
 
 /// Run `argv` as a child, relay signals to it, and wait for it and all of
-/// its descendants to be gone. With `branch`, the command runs inside that
-/// workspace branch (see `branch.rs`).
-pub fn supervise(argv: &[OsString], branch: Option<&Prepared>) -> io::Result<Outcome> {
+/// its descendants to be gone. With `isolation`, the command runs isolated
+/// as it describes: in a branch, read-only, offline (see `isolate.rs`).
+pub fn supervise(argv: &[OsString], isolation: Option<&Plan>) -> io::Result<Outcome> {
     let (program, args) = argv
         .split_first()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no command given"))?;
@@ -90,7 +90,7 @@ pub fn supervise(argv: &[OsString], branch: Option<&Prepared>) -> io::Result<Out
 
     let parent = unsafe { libc::getpid() };
     let empty = sigset(&[]);
-    let in_branch = branch.cloned();
+    let plan = isolation.cloned();
     let mut cmd = Command::new(program);
     cmd.args(args);
     // SAFETY: the closure runs in the forked child before exec and only
@@ -103,9 +103,9 @@ pub fn supervise(argv: &[OsString], branch: Option<&Prepared>) -> io::Result<Out
             if let Some(procs) = &entry {
                 let _ = cgroup::enter(procs);
             }
-            // Then the branch: from here on, the workspace is the overlay.
-            if let Some(prepared) = &in_branch {
-                branch::enter(prepared)?;
+            // Then the isolation: from here on, the workspace is the overlay.
+            if let Some(plan) = &plan {
+                isolate::enter(plan)?;
             }
             // The signal mask and ignored dispositions survive exec; undo ours.
             check(libc::pthread_sigmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut()))?;
@@ -121,9 +121,9 @@ pub fn supervise(argv: &[OsString], branch: Option<&Prepared>) -> io::Result<Out
     }
     let pid = match cmd.spawn() {
         Ok(child) => child.id() as pid_t,
-        // Entering the branch and running the command report errors the same
-        // way; a throwaway test child tells the two apart.
-        Err(err) if branch.is_some_and(|b| !branch::can_enter(b)) => return Err(branch::explain(err)),
+        // Isolating and running the command report errors the same way; a
+        // throwaway test child tells the two apart.
+        Err(err) if isolation.is_some_and(|p| !isolate::can_enter(p)) => return Err(isolate::explain(err)),
         Err(err) => return Err(err),
     };
     let contained = cgroup.as_ref().is_some_and(|cg| cg.contains(pid as u32));

@@ -4,13 +4,28 @@ on: [push, pull_request]
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
-      # The runner's own cgroup is not delegated, so this run exercises the
-      # subreaper-only fallback (cgroup tests skip themselves).
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      # Ubuntu >= 23.10 restricts unprivileged user namespaces; `foil setup`
+      # installs the AppArmor profile that lets the foil binary use them, as
+      # a customer would. From here on, branch and isolation tests must run.
+      - name: Allow foil to use user namespaces
+        run: |
+          cargo build
+          sudo target/debug/foil setup
+          echo "FOIL_REQUIRE_BRANCH=1" >> "$GITHUB_ENV"
+
+      # The runner's own cgroup is not delegated and there is no systemd user
+      # session yet, so this run exercises the subreaper-only fallback
+      # (cgroup and limit tests skip themselves).
       - name: Test (fallback, no cgroup box)
         run: cargo test --all-targets
 
@@ -21,5 +36,23 @@ jobs:
           echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
           for i in $(seq 30); do [ -S "/run/user/$(id -u)/bus" ] && break; sleep 1; done
 
-      - name: Test (cgroup box required)
-        run: systemd-run --user --scope -q env FOIL_REQUIRE_CGROUP=1 cargo test --all-targets
+      - name: Test (cgroup box and limits required)
+        run: systemd-run --user --scope -q env FOIL_REQUIRE_CGROUP=1 FOIL_REQUIRE_LIMITS=1 cargo test --all-targets
+
+      - name: Doctor
+        run: target/debug/foil doctor
+
+  release:
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: Static binary
+        run: cargo build --release --target x86_64-unknown-linux-musl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: foil-x86_64-linux
+          path: target/x86_64-unknown-linux-musl/release/foil

@@ -73,7 +73,7 @@ fn branches_available() -> bool {
     }
     let stderr = text(&out.stderr);
     assert!(
-        stderr.contains("cannot enter the branch") && std::env::var_os("FOIL_REQUIRE_BRANCH").is_none(),
+        stderr.contains("cannot isolate the command") && std::env::var_os("FOIL_REQUIRE_BRANCH").is_none(),
         "branches unavailable: {stderr}"
     );
     eprintln!("skipped: branches unavailable here: {stderr}");
@@ -247,4 +247,108 @@ fn unknown_branch_is_an_error() {
 
     assert_eq!(out.status.code(), Some(1));
     assert!(text(&out.stderr).contains("no branch named nope"));
+}
+
+#[test]
+fn diff_shows_a_patch_and_json() {
+    if !branches_available() {
+        return;
+    }
+    let env = Env::new("patch");
+    assert!(env.run("t", EDITS).status.success());
+    let patch = text(&env.foil(&["diff", "--patch", "t"]).output().unwrap().stdout);
+    let json = text(&env.foil(&["diff", "--json", "t"]).output().unwrap().stdout);
+
+    for line in ["--- a/a.txt", "+++ b/a.txt", "-base", "+changed", "+new", "-doomed"] {
+        assert!(patch.lines().any(|l| l == line), "missing {line:?} in:\n{patch}");
+    }
+    assert_eq!(
+        json,
+        "[{\"kind\":\"M\",\"path\":\"a.txt\"},{\"kind\":\"A\",\"path\":\"b.txt\"},{\"kind\":\"D\",\"path\":\"c.txt\"}]\n"
+    );
+}
+
+#[test]
+fn commit_refuses_files_changed_in_the_workspace_since_unless_forced() {
+    if !branches_available() {
+        return;
+    }
+    let env = Env::new("conflict");
+    assert!(env.run("t", EDITS).status.success());
+    // Kernel timestamps are coarse (a few ms); make "later" unambiguous.
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::write(env.ws().join("a.txt"), "outside\n").unwrap();
+    std::fs::write(env.ws().join("d/old"), "untouched by the branch\n").unwrap();
+
+    let refused = env.foil(&["commit", "t"]).output().unwrap();
+    assert_eq!(refused.status.code(), Some(1));
+    let stderr = text(&refused.stderr);
+    assert!(stderr.contains("  a.txt") && !stderr.contains("d/old"), "{stderr}");
+    assert_eq!(env.read("a.txt").as_deref(), Some("outside\n"));
+    assert_eq!(env.read("b.txt"), None, "a refused commit applied something");
+
+    let forced = env.foil(&["commit", "--force", "t"]).output().unwrap();
+    assert!(forced.status.success(), "{}", text(&forced.stderr));
+    assert_eq!(env.read("a.txt").as_deref(), Some("changed\n"));
+}
+
+#[test]
+fn leftovers_of_a_killed_foil_are_stopped_before_the_branch_is_committed() {
+    if !branches_available() {
+        return;
+    }
+    let env = Env::new("stale");
+    let pid_file = env.root.join("writer.pid");
+    // A writer in the background, still appending to the branch after the
+    // shell that started it (and foil) are gone.
+    let script = format!(
+        "(while :; do echo tick >> log; sleep 0.02; done) & echo $! > {}; wait",
+        pid_file.display()
+    );
+    let mut foil = env
+        .foil(&["run", "--branch", "t", "--", "sh", "-c", &script])
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let writer: i32 = loop {
+        if let Some(pid) = std::fs::read_to_string(&pid_file).ok().and_then(|p| p.trim().parse().ok()) {
+            break pid;
+        }
+        assert!(std::time::Instant::now() < deadline, "writer never started");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    // If the test fails, don't leave the writer holding the test's stderr open.
+    struct KillOnDrop(i32);
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            // Only while it is still in a foil box: its PID may since have been reused.
+            let cgroup = std::fs::read_to_string(format!("/proc/{}/cgroup", self.0)).unwrap_or_default();
+            if cgroup.contains("/foil-") {
+                unsafe { libc::kill(self.0, libc::SIGKILL) };
+            }
+        }
+    }
+    let _guard = KillOnDrop(writer);
+    let boxed = std::fs::read_to_string(format!("/proc/{writer}/cgroup")).is_ok_and(|c| c.contains("/foil-"));
+    foil.kill().unwrap(); // SIGKILL: foil gets no chance to clean up
+    foil.wait().unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    let alive = |pid: i32| {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .is_ok_and(|stat| !stat.rsplit(')').next().unwrap_or("").trim_start().starts_with('Z'))
+    };
+    assert!(alive(writer), "the writer should have outlived foil");
+    if !boxed {
+        assert!(std::env::var_os("FOIL_REQUIRE_CGROUP").is_none(), "run was not boxed");
+        eprintln!("skipped: no cleanup box, so leftovers of a killed foil cannot be found");
+        return;
+    }
+
+    let out = env.foil(&["commit", "t"]).output().unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(!alive(writer), "the leftover writer survived the commit");
+    let committed = env.read("log").unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(env.read("log").unwrap(), committed, "something still writes to the workspace");
 }

@@ -1,7 +1,10 @@
 [package]
 name = "foil"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+description = "Instant copy-on-write branches and a sandbox for AI agents working in your repo"
+license = "UNLICENSED"
+publish = false
 
 [dependencies]
 libc = "0.2"
@@ -12,3 +15,8 @@ criterion = "0.5"
 [[bench]]
 name = "overhead"
 harness = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

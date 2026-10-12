@@ -9,6 +9,11 @@
 //! user, as inside a systemd user scope (`systemd-run --user --scope`). When
 //! it is not, `Cgroup::create` returns `None` and foil falls back to
 //! subreaper-only cleanup. `FOIL_NO_CGROUP=1` forces the fallback.
+//!
+//! A foil that is SIGKILLed cannot clean up: its command dies with it (see
+//! PR_SET_PDEATHSIG in `supervisor.rs`), but what the command started lives
+//! on in the box. Such stale boxes are reaped by the next foil that creates a
+//! box next to them, or that takes the lock of the branch they ran in.
 
 use std::ffi::CString;
 use std::io;
@@ -34,12 +39,12 @@ impl Cgroup {
         if std::env::var_os("FOIL_NO_CGROUP").is_some() {
             return None;
         }
-        let parent = Path::new(CGROUP_ROOT).join(own_cgroup()?.trim_start_matches('/'));
-        // Moving a process needs write access to the common ancestor's cgroup.procs.
-        if !is_cgroup2(&parent) || !writable(&parent.join("cgroup.procs")) {
+        if !can_box() {
             return None;
         }
-        let dir = parent.join(format!("foil-{}", std::process::id()));
+        let dir = box_path()?;
+        let parent = dir.parent()?;
+        reap_stale_siblings(parent);
         if let Err(err) = std::fs::create_dir(&dir) {
             if err.kind() != io::ErrorKind::AlreadyExists {
                 return None;
@@ -99,6 +104,47 @@ impl Drop for Cgroup {
         }
         let _ = remove_tree(&self.dir);
     }
+}
+
+/// Whether foil's own cgroup lets it create a box (cgroup v2, delegated).
+pub fn can_box() -> bool {
+    let Some(dir) = box_path() else { return false };
+    let parent = dir.parent().unwrap_or(&dir);
+    // Moving a process needs write access to the common ancestor's cgroup.procs.
+    is_cgroup2(parent) && writable(&parent.join("cgroup.procs"))
+}
+
+/// Where this process's box goes: `<own cgroup>/foil-<pid>`.
+pub fn box_path() -> Option<PathBuf> {
+    let parent = Path::new(CGROUP_ROOT).join(own_cgroup()?.trim_start_matches('/'));
+    Some(parent.join(format!("foil-{}", std::process::id())))
+}
+
+/// Kill and remove the box at `dir` if the foil that made it is gone.
+/// Returns whether a stale box was found. A live owner is left alone.
+pub fn reap_stale(dir: &Path) -> bool {
+    let owner = dir.file_name().and_then(|n| n.to_str()?.strip_prefix("foil-")?.parse::<i32>().ok());
+    let Some(owner) = owner else { return false };
+    if !dir.starts_with(CGROUP_ROOT) || !dir.is_dir() || alive(owner) {
+        return false;
+    }
+    kill_and_remove(dir).is_ok()
+}
+
+/// Reap stale boxes in `parent`, i.e. made by foils that ran in the same cgroup.
+fn reap_stale_siblings(parent: &Path) {
+    for entry in std::fs::read_dir(parent).into_iter().flatten().flatten() {
+        if entry.file_name().as_bytes().starts_with(b"foil-") {
+            reap_stale(&entry.path());
+        }
+    }
+}
+
+/// Whether a process with this PID exists (EPERM: it exists, not ours).
+fn alive(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks for existence and permission.
+    let exists = unsafe { libc::kill(pid, 0) } == 0;
+    exists || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 /// Move the calling process into the box whose `cgroup.procs` is `procs`.

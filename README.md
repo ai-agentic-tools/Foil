@@ -1,18 +1,199 @@
 # foil
 
-Project Foil: instant, throwaway copy-on-write branches of a workspace for
-AI agents, plus a supervisor that leaves no stray processes behind. Linux only.
+**Let AI agents loose on your repo without letting them loose on your machine.**
+
+`foil` gives a coding agent an instant, private copy-on-write *branch* of your
+working folder. The agent edits, builds and tests freely; your real folder
+does not change until you review the diff and `foil commit`. Add `--protect`
+and nothing outside the branch is writable; add `--no-network` and nothing
+leaves the box; add `--memory`/`--cpus`/`--pids` and a runaway process can't
+take the machine down with it. When the run ends, every process it started
+is gone, even daemons that double-forked away.
 
 ```sh
-foil run -- <command> [args...]                  # supervise a command
-foil run --branch try-1 -- <command> [args...]   # run it in a private branch of the current folder
-foil diff try-1                                  # A added, M modified, D deleted, R replaced
-foil commit try-1                                # apply the branch to the folder
-foil abort try-1                                 # throw the branch away
-foil list
+foil run -b fix-login --protect --memory 8G -- claude -p "fix the flaky login test"
+foil diff --patch fix-login        # review exactly what changed
+foil commit fix-login              # apply it (or: foil abort fix-login)
 ```
 
-Branches need Linux >= 5.11 with unprivileged user namespaces. They are
-stored in `$FOIL_HOME` (default `~/.local/share/foil`), which must be outside
-the workspace. Leftover processes get SIGTERM and `FOIL_GRACE_MS` (default
-1000) to exit before SIGKILL.
+No root, no daemon, no container image, no copy: one static 1 MB binary on
+plain Linux.
+
+## Why
+
+Agents are most useful when they can run things: install packages, run the
+test suite, try a refactor, throw it away, try again. Today that means
+either watching every command, or trusting the agent with your whole home
+directory. Copying the repo (or a git worktree per agent) is slow for big
+repos, misses untracked files and build state, and protects nothing outside
+the copy.
+
+| On a 1 GB, 10 000-file workspace | `cp -a` | `foil run -b` |
+|---|---|---|
+| Time to a usable private copy | 1.9 s | **~25 ms** (any size) |
+| Extra disk | 977 MB | **only what changes** (3 branches: 80 KB) |
+| Diff / commit a one-file change | — | 5 ms / 6 ms |
+
+*Measured on Ubuntu 26.04, Linux 7.0, 4 vCPU VM. The branch cost does not
+grow with the workspace: nothing is copied until it is written.*
+
+## What you get
+
+- **Branches.** `foil run -b NAME` runs the command on a copy-on-write view of
+  the folder. Run many branches of the same folder in parallel, one per
+  agent. A branch persists across runs until you commit or abort it.
+- **Review, then commit.** `foil diff` lists changes (`A`/`M`/`D`/`R`),
+  `--patch` shows a unified diff, `--json` feeds your tooling.
+  `foil commit` applies the branch. It **refuses** if any file it changes was
+  also changed in the real folder since the branch was made (say, by
+  another agent's commit), naming each one; `--force` overrides.
+- **`--protect`**: the whole filesystem is read-only to the command except
+  the branch, `/tmp`, `/var/tmp`, `/dev/shm` and any `--allow-write PATH`.
+  An agent cannot touch `~/.ssh`, your dotfiles, other repos, or the
+  branch store.
+- **`--no-network`**: the command gets a private network with only loopback.
+- **Limits**: `--memory 4G`, `--cpus 2`, `--pids 512`. Exceeding memory kills
+  the command, and foil says so instead of leaving you with a bare exit 137.
+- **Nothing left behind.** Every run gets its own cgroup; when the command
+  exits, stragglers get SIGTERM, a grace period (`FOIL_GRACE_MS`, default
+  1000), then SIGKILL. Even if foil itself is `kill -9`ed, the next foil to
+  touch that branch stops the leftovers first, so a commit never races a
+  writer. (This needs the cleanup box, which systemd provides on normal
+  desktops and servers; `foil doctor` tells you.)
+- **Transparent.** Same user, same paths, same terminal, same environment;
+  signals are forwarded; foil exits exactly as the command did.
+
+## Install
+
+Linux, kernel 5.12 or newer (Ubuntu 22.04+, Debian 12+, Fedora 36+).
+Tested on x86_64; other architectures build from source but are untested.
+
+```sh
+git clone <this repo> && cd foil
+./install.sh          # builds a static binary into /usr/local/bin, runs `foil setup` if needed
+foil doctor           # what works on this machine, and how to fix what doesn't
+```
+
+**Ubuntu 23.10 and later** only let approved programs create user
+namespaces. `sudo foil setup` installs a small AppArmor profile approving the
+foil binary at its current path (as browsers and Podman do). Run it again if
+you move the binary.
+
+`foil doctor` on a healthy machine:
+
+```
+ok  kernel        Linux 7.0.0-34-generic (branches need >= 5.11, --protect >= 5.12)
+ok  cleanup box   branch, isolated and limited runs get one through a systemd scope (~12 ms); ...
+ok  branches      copy-on-write branches work (stored in /home/me/.local/share/foil)
+ok  --protect     read-only view of everything outside the workspace works
+ok  --no-network  network isolation works
+ok  limits        --memory/--cpus/--pids via systemd (controllers: cpuset cpu io memory pids)
+```
+
+## Recipes
+
+**One agent, one task, reviewed before it lands**
+
+```sh
+cd ~/src/app
+foil run -b task-42 --protect --allow-write ~/.claude --memory 8G -- claude
+foil diff --patch task-42 | less
+foil commit task-42
+```
+
+The agent itself needs the network (its API) and somewhere to keep its own
+state: allow its state folder, not your whole home directory.
+`--allow-write` also takes single files, but programs that save a file by
+writing a temporary file next to it and renaming it need the folder.
+
+**Several agents on the same repo at once**
+
+```sh
+for n in 1 2 3; do
+  foil run -b attempt-$n --protect --memory 4G -- my-agent "make the build 2x faster" &
+done; wait
+foil diff attempt-1; foil diff attempt-2; foil diff attempt-3
+foil commit attempt-2 && foil abort attempt-1 && foil abort attempt-3
+```
+
+**Untrusted code: someone else's PR, an install script, a test suite**
+
+```sh
+foil run -b pr-1234 --protect --no-network --memory 2G --pids 256 -- make test
+foil abort pr-1234
+```
+
+**In CI or scripts**
+
+```sh
+foil run -b ci-$RUN_ID --protect -- ./generate-code.sh
+foil diff --json ci-$RUN_ID          # [{"kind":"M","path":"src/api.rs"}, ...]
+```
+
+## Commands
+
+```
+foil run [options] [--] <command> [args...]
+  -b, --branch NAME     run in branch NAME of the workspace (created if new)
+  -w, --workspace DIR   the folder a new branch branches (default: .)
+  --protect             everything except the branch and temp dirs is read-only
+  --allow-write PATH    with --protect: keep PATH writable too (repeatable)
+  --no-network          no network (loopback only)
+  --memory SIZE         memory limit, e.g. 2G
+  --cpus N              CPU limit, e.g. 1.5
+  --pids N              process and thread limit
+foil diff [--patch | --json] NAME
+foil commit [--force] NAME
+foil abort NAME
+foil list [--json]
+foil doctor
+foil setup [--print]
+```
+
+Exit status: the command's own, or 125 if foil could not set the run up,
+126 if the command could not be executed, 127 if it was not found.
+
+Environment: `FOIL_HOME` (branch store, default `~/.local/share/foil`; must
+be outside the workspace), `FOIL_GRACE_MS`, `FOIL_NO_SCOPE=1` (never create
+a systemd scope), `FOIL_NO_CGROUP=1` (no cleanup box).
+
+## What foil is not
+
+foil is a guard rail, not a security boundary against a determined attacker.
+
+- **Reads are not restricted.** `--protect` stops writes; the command can still
+  *read* whatever you can, including `~/.ssh` and tokens. Combine it with
+  `--no-network` when the code is untrusted, so nothing it reads can leave.
+- **Same kernel.** Isolation uses Linux namespaces, like rootless containers;
+  it does not protect against kernel exploits. Use a VM for hostile code.
+- **`/tmp` is shared** with the rest of the machine under `--protect`.
+- **Commit is per file atomic, not all at once.** If a commit fails half-way
+  (disk full), the branch is kept so you can retry.
+- **Conflicts are detected per path, not merged.** A conflicting commit is
+  refused; you choose to force it or abort.
+
+## How it works
+
+`foil run` forks the command into a fresh cgroup and, before it starts, into
+a new user namespace that maps your own uid to itself (so no root), a new
+mount namespace in which an overlayfs is mounted right over the workspace
+path (reads fall through to the real folder; writes land in the branch's
+upper layer), optionally a read-only remount of everything else, and
+optionally an empty network namespace. When the command and everything it
+started have exited, the namespaces vanish and the branch's changes sit in
+`$FOIL_HOME/branches/NAME/upper`, ready for `diff` and `commit`.
+
+Limits use a transient systemd scope (`systemd-run --user --scope`), which
+foil creates by re-running itself inside it; the same scope gives the run a
+cleanup cgroup when your login shell has none.
+
+## Development
+
+```sh
+cargo test                                     # in a Linux VM or box
+systemd-run --user --scope cargo test          # with a delegated cgroup
+FOIL_REQUIRE_BRANCH=1 FOIL_REQUIRE_LIMITS=1 ... # make skips into failures
+```
+
+Tests that need user namespaces, a delegated cgroup or systemd skip
+themselves where those are missing; CI runs them all, required.

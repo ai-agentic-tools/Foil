@@ -19,6 +19,8 @@ fn spawn_true(c: &mut Criterion) {
     });
     // A run inside a branch: user + mount namespaces and an overlay mount.
     // Needs unprivileged user namespaces; the workspace lives in the temp dir.
+    // FOIL_NO_SCOPE: time the branch itself, not the systemd scope foil
+    // would otherwise add when it has no delegated cgroup (~12 ms).
     let root = std::env::temp_dir().join(format!("foil-bench-{}", std::process::id()));
     std::fs::create_dir_all(root.join("ws")).unwrap();
     let run_in_branch = || {
@@ -26,6 +28,7 @@ fn spawn_true(c: &mut Criterion) {
             .args(["run", "--branch", "bench", "--", "true"])
             .current_dir(root.join("ws"))
             .env("FOIL_HOME", root.join("home"))
+            .env("FOIL_NO_SCOPE", "1")
             .stderr(std::process::Stdio::null())
             .status()
             .unwrap()

@@ -9,8 +9,9 @@ foil agreed again. Without the fix, the target tests failed inside foil, and
 
 Setup: Ubuntu 26.04 VM (Linux 7.0, 4 vCPUs, 6 GB), foil 0.2.0 at `e64d8f2`
 installed with `install.sh` (AppArmor restriction on, `foil setup` run by the
-installer). 36 SWE-bench Lite tasks: 3 per Django version 3.0–5.0 (21) and 1
-per sympy version 1.0–1.13 (15 incl. the smoke tasks); the "agent" is each
+installer). 36 SWE-bench Lite tasks: 22 Django (3 per version 3.0–5.0, plus
+one smoke-test task) and 14 sympy (one per version 1.0–1.13, plus one smoke-
+test task); the "agent" is each
 task's merged fix. Python 3.9 (3.11 for Django 5.0) via uv, not SWE-bench's
 Docker images. Reproduce: `fetch.py`, then `run.py`, `extra.py`, `summarize.py`.
 

@@ -30,7 +30,7 @@ use crate::isolate::{self, Plan};
 use crate::cgroup::{self, Cgroup};
 
 /// Signals foil relays to the child. SIGCHLD is watched too, for reaping.
-const FORWARDED: [c_int; 7] = [
+pub(crate) const FORWARDED: [c_int; 7] = [
     libc::SIGHUP,
     libc::SIGINT,
     libc::SIGQUIT,
@@ -91,8 +91,15 @@ pub fn supervise(argv: &[OsString], isolation: Option<&Plan>) -> io::Result<Outc
     let parent = unsafe { libc::getpid() };
     let empty = sigset(&[]);
     let plan = isolation.cloned();
-    let mut cmd = Command::new(program);
-    cmd.args(args);
+    let (program, args) = match isolation {
+        Some(p) => p.wrap(argv),
+        None => (program.clone(), args.to_vec()),
+    };
+    let mut cmd = Command::new(&program);
+    cmd.args(&args);
+    if let Some(env) = isolation.and_then(Plan::env) {
+        cmd.env_clear().envs(env.iter().map(|(k, v)| (k, v)));
+    }
     // SAFETY: the closure runs in the forked child before exec and only
     // makes async-signal-safe calls (no allocation, no locks).
     unsafe {
@@ -103,19 +110,21 @@ pub fn supervise(argv: &[OsString], isolation: Option<&Plan>) -> io::Result<Outc
             if let Some(procs) = &entry {
                 let _ = cgroup::enter(procs);
             }
-            // Then the isolation: from here on, the workspace is the overlay.
-            if let Some(plan) = &plan {
-                isolate::enter(plan)?;
-            }
-            // The signal mask and ignored dispositions survive exec; undo ours.
-            check(libc::pthread_sigmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut()))?;
-            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
             // Dead-man's switch: if foil dies (even by SIGKILL), so does the child.
             cvt(libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong))?;
             // foil may have died between fork and prctl; then no signal will come.
             if libc::getppid() != parent {
                 libc::_exit(1);
             }
+            // Then the isolation: from here on, the workspace is the overlay.
+            // (In a strict run this returns in a new child, PID 1 of its own
+            // PID namespace, which arms its own dead-man's switch.)
+            if let Some(plan) = &plan {
+                isolate::enter(plan)?;
+            }
+            // The signal mask and ignored dispositions survive exec; undo ours.
+            check(libc::pthread_sigmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut()))?;
+            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
             Ok(())
         });
     }
@@ -195,7 +204,7 @@ fn wait_for_exit(pid: pid_t, sfd: &OwnedFd) -> io::Result<(Termination, usize)> 
 }
 
 /// FOIL_GRACE_MS as a duration; 0 means SIGKILL leftovers at once.
-fn grace_from_env() -> Duration {
+pub(crate) fn grace_from_env() -> Duration {
     let Some(raw) = std::env::var_os("FOIL_GRACE_MS") else {
         return DEFAULT_GRACE;
     };

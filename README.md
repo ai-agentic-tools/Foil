@@ -11,7 +11,19 @@ take the machine down with it. When the run ends, every process it started
 is gone, even daemons that double-forked away.
 
 ```sh
-foil run -b fix-login --protect --memory 8G -- claude -p "fix the flaky login test"
+foil agent claude                  # Claude Code, in a strict branch of this folder
+# ... work with the agent; when it exits, foil shows what it changed and asks:
+# Apply to ~/src/app? [c]ommit / [k]eep for later / [a]bort
+```
+
+`foil agent` runs the agent with `--strict`: it sees only system folders,
+the branch and its own state folder, can't read `~/.ssh` or your tokens,
+can't see the API key it uses (foil's proxy adds it to requests on the way
+out), and can reach only the hosts its profile allows. Any command works the
+same way with `foil run`:
+
+```sh
+foil run -b fix-login --strict --allow-host pypi.org --memory 8G -- ./my-agent
 foil diff --patch fix-login        # review exactly what changed
 foil commit fix-login              # apply it (or: foil abort fix-login)
 ```
@@ -52,6 +64,16 @@ grow with the workspace: nothing is copied until it is written.*
   An agent cannot touch `~/.ssh`, your dotfiles, other repos, or the
   branch store.
 - **`--no-network`**: the command gets a private network with only loopback.
+- **`--strict`** (what `foil agent` uses): deny by default. The command sees
+  a private root with the system folders (read-only), the workspace, a
+  private `/tmp`, an empty home folder and only the paths you
+  `--allow-read` / `--allow-write`; its own PID and IPC namespaces (it can't
+  see or signal your other processes); `no_new_privs` (no setuid
+  escalation); a clean environment (`--allow-env` to pass a variable); and
+  no network except `--allow-host` hosts through foil's proxy, which can
+  also add an API key the command never sees (`--inject-key anthropic`).
+  `tests/strict.rs` is the escape suite: each guarantee has a test that
+  tries to break it.
 - **Limits**: `--memory 4G`, `--cpus 2`, `--pids 512`. Exceeding memory kills
   the command, and foil says so instead of leaving you with a bare exit 137.
 - **Nothing left behind.** Every run gets its own cgroup; when the command
@@ -137,13 +159,22 @@ foil run [options] [--] <command> [args...]
   -b, --branch NAME     run in branch NAME of the workspace (created if new)
   -w, --workspace DIR   the folder a new branch branches (default: .)
   --protect             everything except the branch and temp dirs is read-only
-  --allow-write PATH    with --protect: keep PATH writable too (repeatable)
+  --allow-write PATH    with --protect or --strict: PATH writable (repeatable)
   --no-network          no network (loopback only)
+  --strict              deny by default (see above)
+  --allow-read PATH     with --strict: show PATH read-only (repeatable)
+  --allow-host HOST     with --strict: reachable through the proxy (host,
+                        host:port, *.domain; repeatable)
+  --inject-key API      with --strict: the proxy adds API's key (anthropic,
+                        openai) from foil's environment
+  --allow-env NAME      with --strict: pass environment variable NAME
+  --setenv NAME=VALUE   with --strict: set NAME inside the run
   --memory SIZE         memory limit, e.g. 2G
   --cpus N              CPU limit, e.g. 1.5
   --pids N              process and thread limit
-foil diff [--patch | --json] NAME
-foil commit [--force] NAME
+foil agent NAME [run options] [-- agent args]    NAME: claude, codex
+foil diff [--patch | --json] [--all] NAME
+foil commit [--force] [--all] NAME
 foil abort NAME
 foil list [--json]
 foil doctor
@@ -161,12 +192,14 @@ a systemd scope), `FOIL_NO_CGROUP=1` (no cleanup box).
 
 foil is a guard rail, not a security boundary against a determined attacker.
 
-- **Reads are not restricted.** `--protect` stops writes; the command can still
-  *read* whatever you can, including `~/.ssh` and tokens. Combine it with
-  `--no-network` when the code is untrusted, so nothing it reads can leave.
+- **Without `--strict`, reads are not restricted.** `--protect` stops writes;
+  the command can still *read* whatever you can. `--strict` hides everything
+  not explicitly shown. Even then, data can leave through hosts you allow, so
+  keep `--allow-host` lists as narrow as the task.
 - **Same kernel.** Isolation uses Linux namespaces, like rootless containers;
   it does not protect against kernel exploits. Use a VM for hostile code.
-- **`/tmp` is shared** with the rest of the machine under `--protect`.
+- **`/tmp` is shared** with the rest of the machine under `--protect` (it is
+  private under `--strict`).
 - **Commit is per file atomic, not all at once.** If a commit fails half-way
   (disk full), the branch is kept so you can retry.
 - **Conflicts are detected per path, not merged.** A conflicting commit is

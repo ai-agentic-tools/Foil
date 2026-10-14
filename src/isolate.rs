@@ -11,7 +11,9 @@
 //! - with `--protect`: every mount made read-only, except clones of the
 //!   workspace, the temp folders and `--allow-write` paths, taken just before
 //!   and put back on top afterwards;
-//! - with `--no-network`: a new network namespace with only loopback.
+//! - with `--no-network`: a new network namespace with only loopback;
+//! - with `--strict`: all of the above made deny-by-default, plus a PID and
+//!   an IPC namespace, `no_new_privs` and a clean environment (`strict.rs`).
 //!
 //! Nothing outlives the run: the namespaces and mounts vanish with its last
 //! process, which the cgroup box makes sure has happened before foil returns.
@@ -19,7 +21,7 @@
 //! Needs unprivileged user namespaces, which some systems restrict;
 //! `explain` turns failures into hints and `foil doctor` checks in advance.
 
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, OsString};
 use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
@@ -29,6 +31,7 @@ use std::process::{Command, Stdio};
 
 use libc::{c_int, c_long};
 
+use crate::strict::{self, View};
 use crate::supervisor::cvt;
 
 /// Paths that stay writable under `--protect` when they exist: scratch space
@@ -45,7 +48,25 @@ pub struct Options {
     pub no_network: bool,
     pub protect: bool,
     pub allow_write: Vec<PathBuf>,
+    pub strict: bool,
+    pub allow_read: Vec<PathBuf>,
+    /// Environment variables passed into a strict run besides the basic set.
+    pub allow_env: Vec<String>,
+    /// `NAME=VALUE` pairs set inside a strict run.
+    pub setenv: Vec<(String, String)>,
+    /// Host folder of the network proxy's socket, when a strict run has one.
+    pub proxy_dir: Option<PathBuf>,
 }
+
+/// Variables a strict run keeps from foil's environment; everything else
+/// (tokens, keys, agent sockets) is left out unless `--allow-env` names it.
+const BASIC_ENV: [&str; 16] = [
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "COLORTERM", "TERM_PROGRAM", "LANG", "LANGUAGE", "TZ",
+    "NO_COLOR", "FORCE_COLOR", "COLUMNS", "LINES", "EDITOR",
+];
+
+/// Port of the in-sandbox relay to the network proxy.
+pub const PROXY_PORT: u16 = 3128;
 
 /// An overlayfs mount: `lower` seen through `upper`, mounted over `lower`.
 #[derive(Clone)]
@@ -96,16 +117,25 @@ pub struct Plan {
     no_network: bool,
     /// The directory the command starts in, looked up again after the mounts.
     cwd: CString,
+    /// `--strict`: the view to build, and the command's environment.
+    view: Option<View>,
+    env: Option<Vec<(OsString, OsString)>>,
 }
 
 impl Plan {
     /// The plan for these options, or `None` when they ask for no isolation.
     pub fn new(options: &Options, overlay: Option<Overlay>) -> io::Result<Option<Plan>> {
-        if !options.allow_write.is_empty() && !options.protect {
-            return Err(invalid("--allow-write only makes sense with --protect".to_owned()));
+        if !options.allow_write.is_empty() && !options.protect && !options.strict {
+            return Err(invalid("--allow-write only makes sense with --protect or --strict".to_owned()));
         }
-        if overlay.is_none() && !options.protect && !options.no_network {
+        if !options.allow_read.is_empty() && !options.strict {
+            return Err(invalid("--allow-read only makes sense with --strict".to_owned()));
+        }
+        if overlay.is_none() && !options.protect && !options.no_network && !options.strict {
             return Ok(None);
+        }
+        if options.strict {
+            return Plan::strict(options, overlay).map(Some);
         }
         let mut writable = Vec::new();
         if options.protect {
@@ -135,11 +165,74 @@ impl Plan {
             protect: options.protect,
             no_network: options.no_network,
             cwd: c_path(&std::env::current_dir()?)?,
+            view: None,
+            env: None,
         }))
     }
 
+    fn strict(options: &Options, overlay: Option<Overlay>) -> io::Result<Plan> {
+        let cwd = std::env::current_dir()?;
+        let workspace = match &overlay {
+            Some(o) => Some((PathBuf::from(std::ffi::OsStr::from_bytes(o.target.as_bytes())), true)),
+            None => Some((cwd.clone(), false)),
+        };
+        let home = std::env::var_os("HOME").map(PathBuf::from).filter(|h| h.is_absolute());
+        let view = View::new(&strict::Spec {
+            workspace: workspace.as_ref().map(|(p, w)| (p.as_path(), *w)),
+            allow_read: &options.allow_read,
+            allow_write: &options.allow_write,
+            proxy_dir: options.proxy_dir.as_deref(),
+            home,
+        })?;
+        let mut env: Vec<(OsString, OsString)> = std::env::vars_os()
+            .filter(|(k, _)| {
+                let k = k.to_string_lossy();
+                BASIC_ENV.contains(&k.as_ref()) || k.starts_with("LC_") || options.allow_env.iter().any(|a| *a == k)
+            })
+            .collect();
+        env.push(("TMPDIR".into(), "/tmp".into()));
+        for (k, v) in &options.setenv {
+            env.retain(|(name, _)| name != k.as_str());
+            env.push((k.into(), v.into()));
+        }
+        // SAFETY: getuid and getgid cannot fail.
+        let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+        Ok(Plan {
+            uid_map: CString::new(format!("{uid} {uid} 1")).expect("digits only"),
+            gid_map: CString::new(format!("{gid} {gid} 1")).expect("digits only"),
+            overlay,
+            writable: Vec::new(),
+            protect: false,
+            no_network: true,
+            cwd: c_path(&cwd)?,
+            view: Some(view),
+            env: Some(env),
+        })
+    }
+
     fn needs_mounts(&self) -> bool {
-        self.overlay.is_some() || self.protect
+        self.overlay.is_some() || self.protect || self.view.is_some()
+    }
+
+    /// Whether this is a strict run, whose command runs under `foil __pid1`.
+    pub fn is_strict(&self) -> bool {
+        self.view.is_some()
+    }
+
+    /// The environment the command gets, if not foil's own.
+    pub fn env(&self) -> Option<&[(OsString, OsString)]> {
+        self.env.as_deref()
+    }
+
+    /// The program and arguments to exec for `argv`: in a strict run, PID 1's
+    /// helper first. `/proc/self/exe` is foil's own binary, whatever the view shows.
+    pub fn wrap(&self, argv: &[OsString]) -> (OsString, Vec<OsString>) {
+        if !self.is_strict() {
+            return (argv[0].clone(), argv[1..].to_vec());
+        }
+        let mut args = vec![OsString::from("__pid1"), OsString::from("--")];
+        args.extend_from_slice(argv);
+        ("/proc/self/exe".into(), args)
     }
 }
 
@@ -148,6 +241,9 @@ impl Plan {
 /// prebuilt buffers only: no allocation.
 pub fn enter(p: &Plan) -> io::Result<()> {
     let mut flags = libc::CLONE_NEWUSER;
+    if p.view.is_some() {
+        flags |= libc::CLONE_NEWPID | libc::CLONE_NEWIPC;
+    }
     if p.needs_mounts() {
         flags |= libc::CLONE_NEWNS;
     }
@@ -161,6 +257,11 @@ pub fn enter(p: &Plan) -> io::Result<()> {
         write_file(c"/proc/self/setgroups", b"deny")?;
         write_file(c"/proc/self/uid_map", p.uid_map.as_bytes())?;
         write_file(c"/proc/self/gid_map", p.gid_map.as_bytes())?;
+        if p.view.is_some() {
+            // From here on, nothing the command runs can gain privileges
+            // (setuid programs, file capabilities).
+            cvt(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1 as libc::c_ulong, 0, 0, 0))?;
+        }
         if p.no_network {
             // A new network namespace starts with only `lo`, and it is down.
             loopback_up()?;
@@ -185,6 +286,11 @@ pub fn enter(p: &Plan) -> io::Result<()> {
             }
             if p.protect {
                 read_only_except(&p.writable)?;
+            }
+            if let Some(view) = &p.view {
+                strict::build(view)?;
+                // Returns only in PID 1, already inside the view.
+                return strict::fork_pid1(view);
             }
         }
         // A working directory under a new mount still points at what was

@@ -8,6 +8,9 @@ publish = false
 
 [dependencies]
 libc = "0.2"
+# TLS for the network proxy's key injection (strict mode); ring is the crypto backend.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "1"
 
 [dev-dependencies]
 criterion = "0.5"

@@ -9,8 +9,10 @@ TARGET=x86_64-unknown-linux-musl
 case $(uname -s) in Linux) ;; *) echo "foil runs on Linux only" >&2; exit 1 ;; esac
 
 OUT=${CARGO_TARGET_DIR:-target}
-if [ "$(uname -m)" = x86_64 ] && rustup target add $TARGET >/dev/null 2>&1; then
-    cargo build --release --target $TARGET
+# A static binary needs musl-gcc (apt: musl-tools) for the TLS library;
+# without it, build a normal one.
+if [ "$(uname -m)" = x86_64 ] && command -v musl-gcc >/dev/null && rustup target add $TARGET >/dev/null 2>&1 \
+    && cargo build --release --target $TARGET; then
     BIN=$OUT/$TARGET/release/foil
 else
     cargo build --release

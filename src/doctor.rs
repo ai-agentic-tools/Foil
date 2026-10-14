@@ -173,6 +173,15 @@ pub fn doctor() -> io::Result<bool> {
             Err(err) => fix(err),
         },
     });
+    let strict = probe(Options { strict: true, ..Options::default() }, None);
+    checks.push(Check {
+        ok: strict.is_ok(),
+        what: "--strict",
+        detail: match &strict {
+            Ok(()) => "deny-by-default view, PID/IPC isolation, no privilege gain work".to_owned(),
+            Err(err) => fix(err),
+        },
+    });
     let offline = probe(Options { no_network: true, ..Options::default() }, None);
     checks.push(Check {
         ok: offline.is_ok(),

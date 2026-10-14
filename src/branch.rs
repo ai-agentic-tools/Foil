@@ -22,6 +22,7 @@
 //! foil was SIGKILLed, processes it started may still be writing through the
 //! overlay; the next foil to take the branch's lock kills them first.
 
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -29,7 +30,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{symlink, FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::SystemTime;
 
 use crate::cgroup;
@@ -207,7 +208,66 @@ impl Branch {
         fs::symlink_metadata(self.dir.join("workspace"))?.modified()
     }
 
-    /// The changes this branch would make to its workspace, in path order.
+    /// The changes worth reviewing and committing, in path order, and how
+    /// many were left out: in a git repository, paths `.gitignore` ignores
+    /// (build output, `__pycache__`, `node_modules`) are left out unless
+    /// `all`. Outside a git repository nothing is left out.
+    pub fn changes(&self, all: bool) -> io::Result<(Vec<Change>, usize)> {
+        let changes = self.diff()?;
+        if all {
+            return Ok((changes, 0));
+        }
+        let ignored = self.ignored(&changes);
+        let total = changes.len();
+        let kept: Vec<Change> = changes.into_iter().filter(|c| !ignored.contains(&c.path)).collect();
+        let hidden = total - kept.len();
+        Ok((kept, hidden))
+    }
+
+    /// Which of `changes` git ignores in the workspace (asked in one
+    /// `git check-ignore` call). Empty if git is missing or this is not a
+    /// repository. Files git tracks are never reported, even if a pattern
+    /// matches them.
+    fn ignored(&self, changes: &[Change]) -> HashSet<PathBuf> {
+        let mut input = Vec::new();
+        for change in changes {
+            input.extend_from_slice(change.path.as_os_str().as_bytes());
+            // A trailing slash lets directory-only patterns like `build/`
+            // match a directory that exists only in the branch.
+            if self.upper().join(&change.path).symlink_metadata().is_ok_and(|m| m.is_dir()) {
+                input.push(b'/');
+            }
+            input.push(0);
+        }
+        let child = Command::new("git")
+            .arg("-C")
+            .arg(&self.workspace)
+            .args(["check-ignore", "-z", "--stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn();
+        let Ok(mut child) = child else { return HashSet::new() };
+        // Feed stdin from another thread: git answers while we still write,
+        // and two full pipes would wait on each other forever.
+        let mut stdin = child.stdin.take().expect("piped");
+        let writer = std::thread::spawn(move || stdin.write_all(&input));
+        let output = child.wait_with_output();
+        let _ = writer.join();
+        // Exit 0: some paths are ignored; 1: none; 128: not a repository.
+        let output = match output {
+            Ok(output) if output.status.code() == Some(0) => output,
+            _ => return HashSet::new(),
+        };
+        output
+            .stdout
+            .split(|&b| b == 0)
+            .filter(|p| !p.is_empty())
+            .map(|p| PathBuf::from(OsStr::from_bytes(p.strip_suffix(b"/").unwrap_or(p))))
+            .collect()
+    }
+
+    /// Every change this branch would make to its workspace, in path order.
     pub fn diff(&self) -> io::Result<Vec<Change>> {
         let mut changes = Vec::new();
         self.collect_changes(Path::new(""), &mut changes)?;
@@ -251,10 +311,10 @@ impl Branch {
     /// Paths the branch changed that were also changed in the workspace
     /// since the branch was created, e.g. by another branch's commit.
     /// Judged by ctime, which (unlike mtime) cannot be set back by hand.
-    pub fn conflicts(&self) -> io::Result<Vec<PathBuf>> {
+    pub fn conflicts(&self, all: bool) -> io::Result<Vec<PathBuf>> {
         let created = self.created()?;
         let mut conflicts = Vec::new();
-        for change in self.diff()? {
+        for change in self.changes(all)?.0 {
             let changed_since = match self.workspace.join(&change.path).symlink_metadata() {
                 Ok(meta) => ctime(&meta) > created,
                 // Gone now: deleted on both sides is no conflict; otherwise it is.
@@ -269,13 +329,14 @@ impl Branch {
 
     /// Apply the branch's changes to its workspace, then delete the branch.
     /// Refuses if any change conflicts (see `conflicts`), unless `force`.
+    /// Ignored paths (see `changes`) are dropped with the branch unless `all`.
     /// Each file is replaced atomically, but the commit as a whole is not:
     /// if it fails half-way, the branch is kept so it can be retried.
-    pub fn commit(self, force: bool) -> io::Result<usize> {
+    pub fn commit(self, force: bool, all: bool) -> io::Result<usize> {
         // Held until the branch is gone, so no run can start in between.
         let _lock = self.lock()?;
         if !force {
-            let conflicts = self.conflicts()?;
+            let conflicts = self.conflicts(all)?;
             if !conflicts.is_empty() {
                 let list: Vec<String> = conflicts.iter().map(|p| format!("  {}", p.display())).collect();
                 return Err(io::Error::other(format!(
@@ -289,15 +350,16 @@ impl Branch {
                 )));
             }
         }
-        let applied = apply(&self.upper(), &self.workspace)?;
+        let skip = if all { HashSet::new() } else { self.ignored(&self.diff()?) };
+        let applied = apply(&self.upper(), &self.workspace, Path::new(""), &skip)?;
         remove_all(&self.dir)?;
         Ok(applied)
     }
 
     /// Write the branch's changes as a unified diff (via `diff -u`):
     /// text for regular files, a one-line note for everything else.
-    pub fn write_patch(&self, out: &mut impl Write) -> io::Result<()> {
-        for change in self.diff()? {
+    pub fn write_patch(&self, out: &mut impl Write, all: bool) -> io::Result<()> {
+        for change in self.changes(all)?.0 {
             let old = self.workspace.join(&change.path);
             let new = self.upper().join(&change.path);
             let is_file = |p: &Path| p.symlink_metadata().is_ok_and(|m| m.is_file());
@@ -368,12 +430,17 @@ fn resolve(path: &Path) -> io::Result<PathBuf> {
     Ok(resolved)
 }
 
-/// Copy the changes recorded in `upper` onto `target`, depth first.
-/// Returns the number of changes applied.
-fn apply(upper: &Path, target: &Path) -> io::Result<usize> {
+/// Copy the changes recorded in `upper` onto `target`, depth first,
+/// leaving out the paths in `skip` (relative to the workspace; `rel` is
+/// where `upper` sits). Returns the number of changes applied.
+fn apply(upper: &Path, target: &Path, rel: &Path, skip: &HashSet<PathBuf>) -> io::Result<usize> {
     let mut applied = 0;
     for entry in fs::read_dir(upper)? {
         let entry = entry?;
+        let rel = rel.join(entry.file_name());
+        if skip.contains(&rel) {
+            continue;
+        }
         let from = entry.path();
         let to = target.join(entry.file_name());
         let meta = entry.metadata()?;
@@ -388,7 +455,7 @@ fn apply(upper: &Path, target: &Path) -> io::Result<usize> {
                 fs::create_dir(&to)?;
                 applied += 1;
             }
-            applied += apply(&from, &to)?;
+            applied += apply(&from, &to, &rel, skip)?;
             // Only after filling it: the mode may make the directory read-only.
             fs::set_permissions(&to, fs::Permissions::from_mode(meta.mode() & 0o7777))?;
         } else if kind.is_symlink() {

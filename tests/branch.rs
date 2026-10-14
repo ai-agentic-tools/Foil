@@ -352,3 +352,33 @@ fn leftovers_of_a_killed_foil_are_stopped_before_the_branch_is_committed() {
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(env.read("log").unwrap(), committed, "something still writes to the workspace");
 }
+
+#[test]
+fn ignored_build_output_is_left_out_of_diff_and_commit_unless_all() {
+    if !branches_available() {
+        return;
+    }
+    let env = Env::new("ignored");
+    let git = |args: &[&str]| {
+        let ok = Command::new("git").args(args).current_dir(env.ws()).stdout(Stdio::null()).status();
+        ok.is_ok_and(|s| s.success())
+    };
+    if !git(&["init", "-q"]) {
+        eprintln!("skipped: git not available");
+        return;
+    }
+    std::fs::write(env.ws().join(".gitignore"), "build/\n*.pyc\n").unwrap();
+    assert!(git(&["add", "-A"]));
+    let edits = "echo changed > a.txt; mkdir build; echo obj > build/out.o; echo x > a.pyc";
+    assert!(env.run("t", edits).status.success());
+
+    let diff = env.foil(&["diff", "t"]).output().unwrap();
+    assert_eq!(text(&diff.stdout), "M a.txt\n");
+    assert!(text(&diff.stderr).contains("3 paths ignored"), "{}", text(&diff.stderr));
+    let all = env.foil(&["diff", "--all", "t"]).output().unwrap();
+    assert_eq!(text(&all.stdout), "A a.pyc\nM a.txt\nA build\nA build/out.o\n");
+
+    assert!(env.foil(&["commit", "t"]).status().unwrap().success());
+    assert_eq!(env.read("a.txt").as_deref(), Some("changed\n"));
+    assert!(!env.ws().join("build").exists() && !env.ws().join("a.pyc").exists(), "build output was committed");
+}

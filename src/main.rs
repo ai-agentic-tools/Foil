@@ -19,12 +19,14 @@ usage: foil run [options] [--] <command> [args...]
          --memory SIZE         memory limit, e.g. 2G (needs systemd)
          --cpus N              CPU limit, e.g. 1.5 (needs systemd)
          --pids N              limit on processes and threads (needs systemd)
-       foil diff [--patch | --json] NAME
+       foil diff [--patch | --json] [--all] NAME
                                what branch NAME changed (A added, M modified,
-                               D deleted, R replaced), or the full patch
-       foil commit [--force] NAME
+                               D deleted, R replaced), or the full patch;
+                               paths .gitignore ignores only with --all
+       foil commit [--force] [--all] NAME
                                apply branch NAME to its workspace, then delete it;
-                               refuses files changed there since, unless --force
+                               refuses files changed there since, unless --force;
+                               leaves out ignored paths (build output), unless --all
        foil abort NAME         delete branch NAME; the workspace is untouched
        foil list [--json]      list branches and their workspaces
        foil doctor             check what works on this machine
@@ -39,9 +41,10 @@ fn main() {
         Some("run") => run(rest),
         Some("diff") => diff(rest),
         Some("commit") => {
-            let (flags, name) = flags_and_name(rest, &["--force"]);
+            let (flags, name) = flags_and_name(rest, &["--force", "--all"]);
             let force = flags.contains(&"--force");
-            finish(Branch::open(&name).and_then(|b| b.commit(force)).map(|n| {
+            let all = flags.contains(&"--all");
+            finish(Branch::open(&name).and_then(|b| b.commit(force, all)).map(|n| {
                 println!("applied {n} changes");
             }))
         }
@@ -181,33 +184,40 @@ fn run(args: Vec<OsString>) {
 }
 
 fn diff(args: Vec<OsString>) {
-    let (flags, name) = flags_and_name(args, &["--patch", "--json"]);
+    let (mut flags, name) = flags_and_name(args, &["--patch", "--json", "--all"]);
+    let all = flags.contains(&"--all");
+    flags.retain(|f| *f != "--all");
     if flags.len() > 1 {
         usage();
     }
     let branch = Branch::open(&name);
     let mut out = std::io::stdout().lock();
-    finish(branch.and_then(|branch| match flags.first() {
-        Some(&"--patch") => branch.write_patch(&mut out),
-        Some(_) => {
-            let items: Vec<String> = branch
-                .diff()?
-                .iter()
-                .map(|c| {
-                    format!(
-                        "{{\"kind\":\"{}\",\"path\":{}}}",
-                        c.kind.letter(),
-                        json_string(&c.path.to_string_lossy())
-                    )
-                })
-                .collect();
-            writeln!(out, "[{}]", items.join(","))
+    finish(branch.and_then(|branch| {
+        let (changes, hidden) = branch.changes(all)?;
+        if hidden > 0 {
+            eprintln!("foil: {hidden} paths ignored by .gitignore not shown (build output etc.); --all shows them");
         }
-        None => {
-            for change in branch.diff()? {
-                writeln!(out, "{} {}", change.kind.letter(), change.path.display())?;
+        match flags.first() {
+            Some(&"--patch") => branch.write_patch(&mut out, all),
+            Some(_) => {
+                let items: Vec<String> = changes
+                    .iter()
+                    .map(|c| {
+                        format!(
+                            "{{\"kind\":\"{}\",\"path\":{}}}",
+                            c.kind.letter(),
+                            json_string(&c.path.to_string_lossy())
+                        )
+                    })
+                    .collect();
+                writeln!(out, "[{}]", items.join(","))
             }
-            Ok(())
+            None => {
+                for change in changes {
+                    writeln!(out, "{} {}", change.kind.letter(), change.path.display())?;
+                }
+                Ok(())
+            }
         }
     }))
 }

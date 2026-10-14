@@ -1,0 +1,40 @@
+{
+ "task": "django__django-11099",
+ "parallel_wall_s": 1.97,
+ "parallel_fix_f2p_pass": true,
+ "parallel_nofix_f2p_fail": true,
+ "parallel_no_leaks": true,
+ "parallel_ws_unchanged": true,
+ "conflict_first_commit_ok": true,
+ "conflict_second_refused": true,
+ "conflict_message": [
+  "foil: branch fix-1 changes files that also changed in /home/sandeep.guest/swe/final/ws-extra/django__django-11099 since the branch was made:",
+  "  django/contrib/auth/validators.py",
+  "  tests/auth_tests/test_validators.py",
+  "review them, then use `foil commit --force fix-1` to overwrite, or `foil abort fix-1`"
+ ],
+ "kill_test_processes_running": 7,
+ "kill_left_after_sigkill": 5,
+ "kill_left_after_abort": 0,
+ "kill_abort_ok": true,
+ "kill_ws_unchanged": true,
+ "workspace": "60M 6072",
+ "cp_a_ms(min,median)": [
+  320.4,
+  326.5
+ ],
+ "git_worktree_add_ms": [
+  452.8,
+  490.3
+ ],
+ "foil_branch_run_true_ms": [
+  17.7,
+  24.5
+ ],
+ "foil_branch_run_true_noscope_ms": [
+  13.7,
+  16.7
+ ],
+ "tests_plain_s(median)": 0.5,
+ "tests_in_foil_s(median)": 0.52
+}

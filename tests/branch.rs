@@ -322,9 +322,12 @@ fn leftovers_of_a_killed_foil_are_stopped_before_the_branch_is_committed() {
     struct KillOnDrop(i32);
     impl Drop for KillOnDrop {
         fn drop(&mut self) {
-            // Only while it is still in a foil box: its PID may since have been reused.
+            // Only while it is still our writer: its PID may since have been
+            // reused. In a foil box, or (without one) still running our loop.
             let cgroup = std::fs::read_to_string(format!("/proc/{}/cgroup", self.0)).unwrap_or_default();
-            if cgroup.contains("/foil-") {
+            let cmdline = std::fs::read(format!("/proc/{}/cmdline", self.0)).unwrap_or_default();
+            let ours = cgroup.contains("/foil-") || String::from_utf8_lossy(&cmdline).contains("echo tick");
+            if ours {
                 unsafe { libc::kill(self.0, libc::SIGKILL) };
             }
         }

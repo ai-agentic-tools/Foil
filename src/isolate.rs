@@ -393,7 +393,10 @@ pub fn explain(err: io::Error) -> io::Error {
 /// The likely cause of an isolation failure on this system.
 pub fn hint(err: &io::Error) -> &'static str {
     let read = |path: &str| fs::read_to_string(path).map(|s| s.trim().to_owned()).unwrap_or_default();
-    if read("/proc/sys/kernel/apparmor_restrict_unprivileged_userns") == "1" {
+    if crate::container::runtime().is_some() {
+        "foil is running inside a container, whose defaults block it; \
+         `foil doctor` lists each blocker and the setting that removes it"
+    } else if read("/proc/sys/kernel/apparmor_restrict_unprivileged_userns") == "1" {
         "AppArmor restricts unprivileged user namespaces here \
          (kernel.apparmor_restrict_unprivileged_userns=1); run `sudo foil setup` once"
     } else if read("/proc/sys/user/max_user_namespaces") == "0" {

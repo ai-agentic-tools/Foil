@@ -1,0 +1,5 @@
+# An image for running foil's test suite inside a container: Ubuntu and the
+# tools the tests use. The tests and the foil binary are mounted in at the
+# same paths as on the host (see test-in-container.sh).
+FROM docker.io/library/ubuntu:24.04
+RUN apt-get update -qq && apt-get install -y -qq curl git python3 procps strace >/dev/null && rm -rf /var/lib/apt/lists/*

@@ -42,6 +42,20 @@ jobs:
       - name: Doctor
         run: target/debug/foil doctor
 
+  # The same suite inside a Docker container, with the settings from
+  # contrib/docker/README.md.
+  container:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build && cargo test --no-run --all-targets
+      - name: Allow foil to use user namespaces (host AppArmor)
+        run: sudo target/debug/foil setup
+      - name: Test inside a container
+        run: contrib/docker/test-in-container.sh
+
   release:
     needs: test
     runs-on: ubuntu-24.04

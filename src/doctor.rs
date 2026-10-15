@@ -132,11 +132,16 @@ pub fn doctor() -> io::Result<bool> {
 
     let boxed = Cgroup::create().is_some();
     let limits = limits_available();
+    let in_container = crate::container::runtime().is_some();
     checks.push(Check {
-        ok: boxed || limits.is_ok(),
+        ok: boxed || limits.is_ok() || in_container,
         what: "cleanup box",
         detail: if boxed {
             "own cgroup per run: leftovers are always found and killed".to_owned()
+        } else if in_container {
+            "no cgroup box inside a container; --strict runs still end every process they start \
+             (their PID namespace dies with them); other runs use subreaper cleanup"
+                .to_owned()
         } else if limits.is_ok() {
             "branch, isolated and limited runs get one through a systemd scope (~12 ms); \
              plain `foil run` falls back to subreaper cleanup"
@@ -197,10 +202,27 @@ pub fn doctor() -> io::Result<bool> {
         what: "limits",
         detail: match limits {
             Ok(controllers) => format!("--memory/--cpus/--pids via systemd (controllers: {controllers})"),
+            Err(why) if in_container => format!("{why}; in a container, use the container's own limits (docker run --memory/--cpus/--pids-limit)"),
             Err(why) => why,
         },
     });
 
+    if let Some(runtime) = crate::container::runtime() {
+        let blockers = crate::container::blockers(&scratch.home);
+        checks.push(Check {
+            ok: blockers.is_empty(),
+            what: "container",
+            detail: if blockers.is_empty() {
+                format!("inside {runtime}, nothing blocks foil")
+            } else {
+                let lines: Vec<String> = blockers
+                    .iter()
+                    .map(|b| format!("{}: blocks {}\n      fix: {}", b.what, b.blocks, b.fix))
+                    .collect();
+                format!("inside {runtime}; {} blocker(s):\n    {}", blockers.len(), lines.join("\n    "))
+            },
+        });
+    }
     for check in &checks {
         println!("{} {:<13} {}", if check.ok { "ok " } else { "NO " }, check.what, check.detail);
     }

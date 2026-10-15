@@ -47,6 +47,9 @@ usage: foil run [options] [--] <command> [args...]
        foil --version";
 
 fn main() {
+    // Inside a container on Ubuntu: get foil's AppArmor profile back if the
+    // runtime started us without it (re-executes once; otherwise returns).
+    foil::container::regain_apparmor_profile();
     let mut args = std::env::args_os().skip(1);
     let Some(sub) = args.next() else { usage() };
     let rest: Vec<OsString> = args.collect();

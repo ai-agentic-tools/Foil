@@ -32,6 +32,13 @@ usage: foil run [options] [--] <command> [args...]
        foil agent NAME [run options] [-- agent args]
                                run agent NAME (claude, codex) in a strict branch with
                                its profile; afterwards, review and commit or abort
+       foil fanout -n N [--check CMD] [--agent NAME] [--name BASE] [--pick]
+                   [run options] [--] <command or agent args...>
+                               run N attempts at once, in branches BASE-1..BASE-N
+                               (FOIL_ATTEMPT=i in each); CMD scores each attempt in
+                               its branch (exit 0 = pass); the best is the passing
+                               attempt with the fewest changes; --pick commits it
+       foil pick NAME          commit fanout attempt NAME, discard its siblings
        foil diff [--patch | --json] [--all] NAME
                                what branch NAME changed (A added, M modified,
                                D deleted, R replaced), or the full patch;
@@ -56,6 +63,13 @@ fn main() {
     match sub.to_str() {
         Some("run") => run(rest),
         Some("agent") => agent(rest),
+        Some("fanout") => fanout(rest),
+        Some("pick") => {
+            let (_, name) = flags_and_name(rest, &[]);
+            finish(foil::fanout::pick(&name).map(|(n, gone)| {
+                println!("applied {n} changes; discarded {}", if gone.is_empty() { "nothing".to_owned() } else { gone.join(", ") });
+            }))
+        }
         // Internal: PID 1 of a strict run, and its network proxy.
         Some("__pid1") => foil::pid1::main(rest.strip_prefix(&[OsString::from("--")][..]).unwrap_or(&rest)),
         Some("__proxy") => foil::proxy::main(&rest),
@@ -121,22 +135,7 @@ fn parse_run(args: Vec<OsString>, mut spec: RunSpec) -> RunSpec {
             Some((flag, value)) if flag.starts_with("--") => (flag.to_owned(), Some(OsString::from(value))),
             _ => (first.clone(), None),
         };
-        let takes_value = matches!(
-            flag.as_str(),
-            "-b" | "--branch"
-                | "-w"
-                | "--workspace"
-                | "--allow-write"
-                | "--allow-read"
-                | "--allow-host"
-                | "--allow-env"
-                | "--inject-key"
-                | "--setenv"
-                | "--memory"
-                | "--cpus"
-                | "--pids"
-        );
-        let switch = matches!(flag.as_str(), "--protect" | "--no-network" | "--strict");
+        let (takes_value, switch) = (run_flag_takes_value(&flag), run_flag_is_switch(&flag));
         if !takes_value && !switch {
             break;
         }
@@ -180,6 +179,30 @@ fn parse_run(args: Vec<OsString>, mut spec: RunSpec) -> RunSpec {
         usage();
     }
     spec
+}
+
+/// `foil run` options that take a value.
+fn run_flag_takes_value(flag: &str) -> bool {
+    matches!(
+        flag,
+        "-b" | "--branch"
+            | "-w"
+            | "--workspace"
+            | "--allow-write"
+            | "--allow-read"
+            | "--allow-host"
+            | "--allow-env"
+            | "--inject-key"
+            | "--setenv"
+            | "--memory"
+            | "--cpus"
+            | "--pids"
+    )
+}
+
+/// `foil run` options that are on/off switches.
+fn run_flag_is_switch(flag: &str) -> bool {
+    matches!(flag, "--protect" | "--no-network" | "--strict")
 }
 
 /// Run `spec` to the end and return how its command terminated. Problems
@@ -316,6 +339,99 @@ fn agent(args: Vec<OsString>) {
     let termination = execute(&spec);
     summarize(&branch, termination);
     exit_like(termination)
+}
+
+/// `foil fanout -n N [--check CMD] [--agent NAME] [--name BASE] [--pick] [run options] [--] ...`.
+fn fanout(args: Vec<OsString>) {
+    use foil::fanout::{self, Plan};
+    let mut args = args.into_iter().peekable();
+    let (mut attempts, mut check, mut agent, mut base, mut pick) = (None, None, None, None, false);
+    // Fanout's own flags may come anywhere among the `foil run` options;
+    // those are set aside (with their values) for every attempt.
+    let mut rest: Vec<OsString> = Vec::new();
+    while let Some(flag) = args.peek().and_then(|a| a.to_str()).map(str::to_owned) {
+        if flag == "--pick" {
+            args.next();
+            pick = true;
+            continue;
+        }
+        let name = flag.split_once('=').filter(|_| flag.starts_with("--")).map_or(flag.as_str(), |(f, _)| f);
+        if !matches!(flag.as_str(), "-n" | "--check" | "--agent" | "--name") {
+            if !run_flag_takes_value(name) && !run_flag_is_switch(name) {
+                break;
+            }
+            rest.extend(args.next());
+            if run_flag_takes_value(name) && !flag.contains('=') {
+                rest.extend(args.next());
+            }
+            continue;
+        }
+        args.next();
+        let value = args.next().unwrap_or_else(|| usage());
+        let text = value.to_str().map(str::to_owned).unwrap_or_else(|| bad(&flag, &value));
+        match flag.as_str() {
+            "-n" => attempts = Some(text.parse::<usize>().ok().filter(|n| (1..=64).contains(n)).unwrap_or_else(|| bad(&flag, &value))),
+            "--check" => check = Some(text),
+            "--agent" => agent = Some(foil::agent::profile(&text).map(|p| p.name.to_owned()).unwrap_or_else(|err| {
+                eprintln!("foil: {err}");
+                exit(2)
+            })),
+            _ => base = Some(text),
+        }
+    }
+    let Some(attempts) = attempts else { usage() };
+
+    // The rest is `foil run` options, then the command: parse them the way
+    // `foil run` will, to reject mistakes now and to split the two.
+    rest.extend(args);
+    let spec = parse_run(rest.clone(), RunSpec::default());
+    if spec.branch_name.is_some() || spec.workspace.is_some() {
+        eprintln!("foil: fanout names the branches itself; leave out -b and -w");
+        exit(2)
+    }
+    if spec.command.is_empty() && agent.is_none() {
+        usage();
+    }
+    let mut run_options = rest[..rest.len() - spec.command.len()].to_vec();
+    if run_options.last().is_some_and(|a| a == "--") {
+        run_options.pop();
+    }
+    let base = base.unwrap_or_else(|| foil::agent::branch_name(agent.as_deref().unwrap_or("fanout")));
+    let plan = Plan { base, attempts, strict: spec.options.strict || agent.is_some(), agent, check, run_options, command: spec.command };
+
+    let started = std::time::Instant::now();
+    let results = fanout::run(&plan).unwrap_or_else(|err| {
+        eprintln!("foil: {err}");
+        exit(125)
+    });
+    eprintln!("foil: {} attempts of {} in {:.1} s", plan.attempts, plan.base, started.elapsed().as_secs_f64());
+    eprintln!("  {:<width$}  status  check  changes  time", "attempt", width = plan.base.len() + 3);
+    for a in &results {
+        let status = a.status.map_or("signal".to_owned(), |c| c.to_string());
+        let check = match a.check {
+            Some(true) => "pass",
+            Some(false) => "fail",
+            None => "-",
+        };
+        eprintln!("  {:<width$}  {status:<6}  {check:<5}  {:<7}  {:.1} s", a.branch, a.changes, a.seconds, width = plan.base.len() + 3);
+    }
+    eprintln!("logs: {}", results[0].log.parent().map(|p| p.display().to_string()).unwrap_or_default());
+    let Some(best) = fanout::best(&results) else {
+        eprintln!("foil: no attempt passed; branches kept for review (foil diff NAME, foil abort NAME)");
+        exit(1)
+    };
+    let name = &results[best].branch;
+    if !pick {
+        eprintln!("best: {name}\nreview: foil diff --patch {name}\nkeep it: foil pick {name} (commits it, discards the others)");
+        return;
+    }
+    match fanout::pick(name) {
+        Ok((n, gone)) => eprintln!("foil: picked {name}: applied {n} changes; discarded {} other attempts", gone.len()),
+        Err(err) => {
+            eprintln!("foil: picking {name}: {err}");
+            exit(1)
+        }
+    }
 }
 
 /// After an agent session: what the branch changed, and what to do with it.

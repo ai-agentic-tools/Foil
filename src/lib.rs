@@ -8,6 +8,7 @@ pub mod branch;
 pub mod cgroup;
 pub mod container;
 pub mod doctor;
+pub mod fanout;
 pub mod isolate;
 pub mod limits;
 pub mod pid1;

@@ -30,7 +30,7 @@ use std::ffi::CString;
 use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use libc::{c_int, c_long};
 
@@ -132,13 +132,28 @@ impl View {
                 Kind::Bind { source: c_path(ws)?, read_only: !writable, devices: false, dir: true },
             );
         }
+        let mut aliases = Vec::new();
         for (paths, writable, flag) in [(spec.allow_read, false, "--allow-read"), (spec.allow_write, true, "--allow-write")] {
             for path in paths {
                 let real = path
                     .canonicalize()
                     .map_err(|err| io::Error::new(err.kind(), format!("{flag} {}: {err}", path.display())))?;
-                let dir = real.is_dir();
-                map.insert(real.clone(), Kind::Bind { source: c_path(&real)?, read_only: !writable, devices: false, dir });
+                let kind = Kind::Bind { source: c_path(&real)?, read_only: !writable, devices: false, dir: real.is_dir() };
+                // Given through a symlink (~/envs -> /data/envs), the path the
+                // command will use doesn't exist in the view: show it there too.
+                let given = std::env::current_dir()?.join(path);
+                if given != real && given.components().all(|c| matches!(c, Component::RootDir | Component::Normal(_))) {
+                    aliases.push((given, kind.clone()));
+                }
+                map.insert(real, kind);
+            }
+        }
+        for (given, kind) in aliases {
+            // Only where its folders can be created in the view's own tmpfs:
+            // never inside another mounted path, where they would be real.
+            let nested = map.iter().any(|(p, k)| *k != Kind::Dir && given.starts_with(p) && *p != given);
+            if !nested {
+                map.entry(given).or_insert(kind);
             }
         }
         // Private scratch space, devices, /proc, and the proxy socket.
@@ -442,5 +457,24 @@ mod tests {
         assert!(pos("/dev") < pos("/dev/null") && pos("/dev/null") < pos("/dev/pts"));
         let home_entry = view.entries.iter().find(|e| e.target.as_bytes().ends_with(home.as_os_str().as_bytes())).unwrap();
         assert_eq!(home_entry.kind, Kind::Dir, "home must be an empty directory, not the real one");
+    }
+
+    #[test]
+    fn a_path_given_through_a_symlink_is_shown_at_both_places() {
+        let root = std::env::temp_dir().join(format!("foil-view-alias-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("real/env")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
+        let given = [root.join("link/env")];
+        let spec = Spec { workspace: None, allow_read: &given, allow_write: &[], proxy_dir: None, home: None };
+        let view = View::new(&spec).unwrap();
+        let shown = |p: &Path| view.entries.iter().any(|e| e.target.as_bytes() == staged_bytes(p));
+        assert!(shown(&root.canonicalize().unwrap().join("real/env")));
+        assert!(shown(&root.join("link/env")), "the path as given must exist in the view");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    fn staged_bytes(p: &Path) -> Vec<u8> {
+        [STAGING.as_bytes(), p.as_os_str().as_bytes()].concat()
     }
 }

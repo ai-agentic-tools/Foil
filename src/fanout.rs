@@ -145,7 +145,7 @@ pub fn pick(name: &str) -> io::Result<(usize, Vec<String>)> {
     for b in Branch::list()? {
         if base_of(&b.name) == Some(base) && b.workspace == workspace {
             discarded.push(b.name.clone());
-            b.abort()?;
+            b.abort(false)?;
         }
     }
     let _ = std::fs::remove_dir_all(branch::home()?.join("fanout").join(base));

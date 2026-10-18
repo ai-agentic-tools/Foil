@@ -22,7 +22,7 @@
 //! foil was SIGKILLed, processes it started may still be writing through the
 //! overlay; the next foil to take the branch's lock kills them first.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -58,7 +58,9 @@ pub enum ChangeKind {
     Added,
     Modified,
     Deleted,
-    /// A directory deleted and created again: only the new contents count.
+    /// Deleted and created again as a directory, or replaced by something
+    /// of another type (a directory by a file, a file by a directory): only
+    /// the new contents count.
     Replaced,
 }
 
@@ -269,6 +271,7 @@ impl Branch {
 
     /// Every change this branch would make to its workspace, in path order.
     pub fn diff(&self) -> io::Result<Vec<Change>> {
+        let _access = Access::open(&self.upper(), &self.dir.join("modes"))?;
         let mut changes = Vec::new();
         self.collect_changes(Path::new(""), &mut changes)?;
         Ok(changes)
@@ -282,9 +285,14 @@ impl Branch {
             let upper = entry.path();
             // DirEntry::metadata does not follow symlinks.
             let meta = entry.metadata()?;
-            let existed = self.workspace.join(&rel).symlink_metadata().is_ok();
+            let before = self.workspace.join(&rel).symlink_metadata().ok();
+            let existed = before.is_some();
+            // A folder that became a file or link, or the other way round.
+            let type_changed = before.as_ref().is_some_and(|b| b.is_dir() != meta.is_dir());
             let kind = if is_whiteout(&meta) {
                 Some(ChangeKind::Deleted)
+            } else if type_changed {
+                Some(ChangeKind::Replaced)
             } else if meta.is_dir() {
                 // A directory is copied up whenever something inside it
                 // changes; by itself that is not a change worth listing.
@@ -330,36 +338,99 @@ impl Branch {
     /// Apply the branch's changes to its workspace, then delete the branch.
     /// Refuses if any change conflicts (see `conflicts`), unless `force`.
     /// Ignored paths (see `changes`) are dropped with the branch unless `all`.
-    /// Each file is replaced atomically, but the commit as a whole is not:
-    /// if it fails half-way, the branch is kept so it can be retried.
+    ///
+    /// Crash-safe: the decision what to apply is first written to a journal
+    /// (`committing`) in the branch, then every change is applied (each file
+    /// replaced atomically), the workspace is synced to disk, and only then
+    /// is the branch deleted. If foil dies, the machine loses power or a
+    /// write fails half-way, the branch and its journal remain, and running
+    /// `foil commit` again finishes the same commit: applying a change twice
+    /// gives the same result.
     pub fn commit(self, force: bool, all: bool) -> io::Result<usize> {
         // Held until the branch is gone, so no run can start in between.
         let _lock = self.lock()?;
-        if !force {
-            let conflicts = self.conflicts(all)?;
-            if !conflicts.is_empty() {
-                let list: Vec<String> = conflicts.iter().map(|p| format!("  {}", p.display())).collect();
-                return Err(io::Error::other(format!(
-                    "branch {} changes files that also changed in {} since the branch was made:\n{}\n\
-                     review them, then use `foil commit --force {}` to overwrite, or `foil abort {}`",
-                    self.name,
-                    self.workspace.display(),
-                    list.join("\n"),
-                    self.name,
-                    self.name
-                )));
+        // One commit at a time per workspace: otherwise two branches could
+        // both pass the conflict check and then overwrite each other.
+        let _workspace = self.workspace_lock()?;
+        let journal = self.dir.join("committing");
+        // The command may have left folders we can't list or files we can't
+        // read in the branch; open them while we work, with the real modes kept.
+        let access = Access::open(&self.upper(), &self.dir.join("modes"))?;
+        let skip = match fs::read(&journal) {
+            // An interrupted commit: finish it as it was decided.
+            Ok(raw) => read_journal(&raw)?,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                check_committable(&self.upper())?;
+                if !force {
+                    let conflicts = self.conflicts(all)?;
+                    if !conflicts.is_empty() {
+                        let list: Vec<String> = conflicts.iter().map(|p| format!("  {}", p.display())).collect();
+                        return Err(io::Error::other(format!(
+                            "branch {} changes files that also changed in {} since the branch was made:\n{}\n\
+                             review them, then use `foil commit --force {}` to overwrite, or `foil abort {}`",
+                            self.name,
+                            self.workspace.display(),
+                            list.join("\n"),
+                            self.name,
+                            self.name
+                        )));
+                    }
+                }
+                let skip = if all { HashSet::new() } else { self.ignored(&self.diff()?) };
+                // The branch's files must be on disk before the journal says
+                // to copy them, and the journal before the first change.
+                sync_fs(&self.upper())?;
+                write_durably(&journal, &journal_bytes(&skip))?;
+                skip
             }
-        }
-        let skip = if all { HashSet::new() } else { self.ignored(&self.diff()?) };
-        let applied = apply(&self.upper(), &self.workspace, Path::new(""), &skip)?;
+            Err(err) => return Err(err),
+        };
+        let mut links = HashMap::new();
+        let applied = apply(&self.upper(), &self.workspace, Path::new(""), &skip, &mut links, &access).map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!(
+                    "commit of branch {} stopped half-way: {err}\nthe workspace has some of its changes; \
+                     fix the cause and run `foil commit {}` again to finish",
+                    self.name, self.name
+                ),
+            )
+        })?;
+        sync_fs(&self.workspace)?;
+        drop(access);
         remove_all(&self.dir)?;
         Ok(applied)
+    }
+
+    /// Whether a commit of this branch was started and did not finish.
+    pub fn commit_interrupted(&self) -> bool {
+        self.dir.join("committing").exists()
+    }
+
+    /// The lock that serializes commits into this branch's workspace,
+    /// `$FOIL_HOME/locks/<hash of the workspace path>`. Waits for it.
+    fn workspace_lock(&self) -> io::Result<File> {
+        let locks = home()?.join("locks");
+        fs::create_dir_all(&locks)?;
+        let file = File::create(locks.join(format!("{:016x}", fnv1a(self.workspace.as_os_str().as_bytes()))))?;
+        loop {
+            // SAFETY: flock on a descriptor we own; released when the file closes.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+                return Ok(file);
+            }
+            let err = io::Error::last_os_error();
+            if err.kind() != io::ErrorKind::Interrupted {
+                return Err(err);
+            }
+        }
     }
 
     /// Write the branch's changes as a unified diff (via `diff -u`):
     /// text for regular files, a one-line note for everything else.
     pub fn write_patch(&self, out: &mut impl Write, all: bool) -> io::Result<()> {
-        for change in self.changes(all)?.0 {
+        let changes = self.changes(all)?.0;
+        let _access = Access::open(&self.upper(), &self.dir.join("modes"))?;
+        for change in changes {
             let old = self.workspace.join(&change.path);
             let new = self.upper().join(&change.path);
             let is_file = |p: &Path| p.symlink_metadata().is_ok_and(|m| m.is_file());
@@ -397,8 +468,20 @@ impl Branch {
     }
 
     /// Delete the branch and everything in it. The workspace is untouched.
-    pub fn abort(self) -> io::Result<()> {
+    /// After an interrupted commit the workspace already has some of the
+    /// branch's changes, so this refuses unless `force`.
+    pub fn abort(self, force: bool) -> io::Result<()> {
         let _lock = self.lock()?;
+        if self.commit_interrupted() && !force {
+            return Err(io::Error::other(format!(
+                "a commit of branch {} was interrupted, so {} has some of its changes; \
+                 run `foil commit {}` to finish it, or `foil abort --force {}` to keep the workspace as it is",
+                self.name,
+                self.workspace.display(),
+                self.name,
+                self.name
+            )));
+        }
         remove_all(&self.dir)
     }
 }
@@ -432,11 +515,22 @@ fn resolve(path: &Path) -> io::Result<PathBuf> {
 
 /// Copy the changes recorded in `upper` onto `target`, depth first,
 /// leaving out the paths in `skip` (relative to the workspace; `rel` is
-/// where `upper` sits). Returns the number of changes applied.
-fn apply(upper: &Path, target: &Path, rel: &Path, skip: &HashSet<PathBuf>) -> io::Result<usize> {
+/// where `upper` sits). Returns the number of changes applied. Applying
+/// twice gives the same result, which is what lets a commit be resumed.
+/// `links` remembers files with several names in the branch (hard links),
+/// so they are linked in the workspace too instead of copied apart.
+fn apply(
+    upper: &Path,
+    target: &Path,
+    rel: &Path,
+    skip: &HashSet<PathBuf>,
+    links: &mut HashMap<(u64, u64), PathBuf>,
+    access: &Access,
+) -> io::Result<usize> {
     let mut applied = 0;
-    for entry in fs::read_dir(upper)? {
-        let entry = entry?;
+    let mut entries: Vec<_> = fs::read_dir(upper)?.collect::<Result<_, _>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
         let rel = rel.join(entry.file_name());
         if skip.contains(&rel) {
             continue;
@@ -445,43 +539,271 @@ fn apply(upper: &Path, target: &Path, rel: &Path, skip: &HashSet<PathBuf>) -> io
         let to = target.join(entry.file_name());
         let meta = entry.metadata()?;
         let kind = meta.file_type();
+        let mode = access.mode(&from, &meta);
         if is_whiteout(&meta) {
             remove_any(&to)?;
-            applied += 1;
         } else if kind.is_dir() {
             let opaque = is_opaque(&from);
             if opaque || !to.symlink_metadata().is_ok_and(|m| m.is_dir()) {
                 remove_any(&to)?;
                 fs::create_dir(&to)?;
-                applied += 1;
+            } else {
+                // A directory made read-only by an earlier, interrupted
+                // attempt must be writable again to be filled.
+                fs::set_permissions(&to, fs::Permissions::from_mode(0o700))?;
             }
-            applied += apply(&from, &to, &rel, skip)?;
+            applied += apply(&from, &to, &rel, skip, links, access)?;
+            copy_xattrs(&from, &to)?;
             // Only after filling it: the mode may make the directory read-only.
-            fs::set_permissions(&to, fs::Permissions::from_mode(meta.mode() & 0o7777))?;
+            fs::set_permissions(&to, fs::Permissions::from_mode(mode))?;
         } else if kind.is_symlink() {
             remove_any(&to)?;
             symlink(fs::read_link(&from)?, &to)?;
-            applied += 1;
         } else if kind.is_file() {
             if to.symlink_metadata().is_ok_and(|m| m.is_dir()) {
-                fs::remove_dir_all(&to)?;
+                remove_any(&to)?;
             }
             // Write next to the target, then rename over it: readers see the
-            // old file or the new one, never half of each.
-            let mut tmp_name = OsStr::new(".foil-commit-").to_os_string();
-            tmp_name.push(entry.file_name());
-            let tmp = target.join(tmp_name);
-            fs::copy(&from, &tmp)?;
+            // old file or the new one, never half of each. One commit at a
+            // time per workspace, so one temporary name per folder is enough.
+            let tmp = target.join(".foil-commit.tmp");
+            // A leftover from an interrupted attempt may be read-only.
+            let _ = fs::remove_file(&tmp);
+            let first_name = (meta.nlink() > 1).then(|| links.get(&(meta.dev(), meta.ino())).cloned()).flatten();
+            match first_name {
+                Some(first) => {
+                    fs::hard_link(&first, &tmp)?;
+                }
+                None => {
+                    fs::copy(&from, &tmp)?;
+                    fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
+                    copy_xattrs(&from, &tmp)?;
+                    if meta.nlink() > 1 {
+                        links.insert((meta.dev(), meta.ino()), to.clone());
+                    }
+                }
+            }
             fs::rename(&tmp, &to)?;
-            applied += 1;
+        } else if kind.is_fifo() {
+            remove_any(&to)?;
+            let path = c_path(&to)?;
+            // SAFETY: valid NUL-terminated path.
+            if unsafe { libc::mkfifo(path.as_ptr(), mode as libc::mode_t) } == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            fs::set_permissions(&to, fs::Permissions::from_mode(mode))?;
         } else {
+            unreachable!("check_committable refuses other file types");
+        }
+        applied += 1;
+        crash_point();
+    }
+    Ok(applied)
+}
+
+/// While it lives, every folder in a branch's upper layer can be listed and
+/// every file read, even if the command removed our own permission (we own
+/// them, so we may give it back). The real modes are written to `record`
+/// before anything is changed, so they survive a crash: the next `open`
+/// reads them back. Dropping restores them and removes the record.
+struct Access {
+    record: PathBuf,
+    /// The real permission bits of every path we opened up.
+    real: Vec<(PathBuf, u32)>,
+    outer: bool,
+}
+
+/// Whether an `Access` is open in this process.
+static ACCESS_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+impl Access {
+    fn open(upper: &Path, record: &Path) -> io::Result<Access> {
+        let mut access = Access { record: record.to_owned(), real: Vec::new(), outer: false };
+        // Within one that is already open (diff inside commit), do nothing:
+        // the outer one restores everything when it is done.
+        if ACCESS_OPEN.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return Ok(access);
+        }
+        access.outer = true;
+        // Left by a foil that died while the paths were open: those are the real modes.
+        if let Ok(raw) = fs::read(record) {
+            for item in raw.split(|&b| b == 0).filter(|i| !i.is_empty()) {
+                let (mode, path) = item.split_at(item.iter().position(|&b| b == b' ').unwrap_or(0));
+                let mode = std::str::from_utf8(mode).ok().and_then(|m| u32::from_str_radix(m, 8).ok());
+                if let (Some(mode), Some(path)) = (mode, path.get(1..)) {
+                    access.real.push((PathBuf::from(OsStr::from_bytes(path)), mode));
+                }
+            }
+        }
+        access.open_dir(upper)?;
+        Ok(access)
+    }
+
+    fn open_dir(&mut self, dir: &Path) -> io::Result<()> {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let meta = entry.metadata()?;
+            let mode = meta.mode() & 0o7777;
+            let path = entry.path();
+            let need = if meta.is_dir() { 0o700 } else if meta.is_file() { 0o600 } else { continue };
+            if mode & need != need && !self.real.iter().any(|(p, _)| *p == path) {
+                self.real.push((path.clone(), mode));
+                self.save()?;
+                fs::set_permissions(&path, fs::Permissions::from_mode(mode | need))?;
+            }
+            if meta.is_dir() {
+                self.open_dir(&path)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn save(&self) -> io::Result<()> {
+        let mut out = Vec::new();
+        for (path, mode) in &self.real {
+            out.extend_from_slice(format!("{mode:o} ").as_bytes());
+            out.extend_from_slice(path.as_os_str().as_bytes());
+            out.push(0);
+        }
+        write_durably(&self.record, &out)
+    }
+
+    /// The real permission bits of `path`, whose current metadata is `meta`.
+    fn mode(&self, path: &Path, meta: &fs::Metadata) -> u32 {
+        self.real.iter().find(|(p, _)| p == path).map_or(meta.mode() & 0o7777, |(_, m)| *m)
+    }
+}
+
+impl Drop for Access {
+    fn drop(&mut self) {
+        if !self.outer {
+            return;
+        }
+        ACCESS_OPEN.store(false, std::sync::atomic::Ordering::SeqCst);
+        if self.real.is_empty() {
+            return;
+        }
+        // Children first, so a folder is closed again only after its contents.
+        let mut real = self.real.clone();
+        real.sort_by(|a, b| b.0.cmp(&a.0));
+        for (path, mode) in real {
+            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(mode));
+        }
+        let _ = fs::remove_file(&self.record);
+    }
+}
+
+/// Refuse a branch holding anything `apply` can't recreate (sockets,
+/// device files), before the commit changes anything.
+fn check_committable(dir: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let meta = entry.metadata()?;
+        let kind = meta.file_type();
+        if kind.is_dir() {
+            check_committable(&entry.path())?;
+        } else if !(is_whiteout(&meta) || kind.is_file() || kind.is_symlink() || kind.is_fifo()) {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                format!("cannot commit special file {}", from.display()),
+                format!("cannot commit special file {} (a socket or device); remove it and commit again", entry.path().display()),
             ));
         }
     }
-    Ok(applied)
+    Ok(())
+}
+
+/// Copy extended attributes, except overlayfs's own bookkeeping.
+fn copy_xattrs(from: &Path, to: &Path) -> io::Result<()> {
+    let (src, dst) = (c_path(from)?, c_path(to)?);
+    let mut names = vec![0u8; 4096];
+    // SAFETY: valid path; the buffer's length is passed.
+    let n = unsafe { libc::llistxattr(src.as_ptr(), names.as_mut_ptr().cast(), names.len()) };
+    if n <= 0 {
+        return Ok(()); // none, or not supported here
+    }
+    for name in names[..n as usize].split(|&b| b == 0).filter(|n| !n.is_empty()) {
+        if name.starts_with(b"user.overlay.") || name.starts_with(b"trusted.overlay.") {
+            continue;
+        }
+        let cname = std::ffi::CString::new(name).expect("split at NUL");
+        let mut value = vec![0u8; 65536];
+        // SAFETY: valid path and name; the buffer's length is passed.
+        let len = unsafe { libc::lgetxattr(src.as_ptr(), cname.as_ptr(), value.as_mut_ptr().cast(), value.len()) };
+        if len < 0 {
+            continue;
+        }
+        // SAFETY: valid path and name; `len` bytes of `value` are initialized.
+        if unsafe { libc::lsetxattr(dst.as_ptr(), cname.as_ptr(), value.as_ptr().cast(), len as usize, 0) } == -1 {
+            let err = io::Error::last_os_error();
+            // Some file systems don't take every namespace; not worth failing a commit.
+            if err.raw_os_error() != Some(libc::ENOTSUP) && err.raw_os_error() != Some(libc::EPERM) {
+                return Err(err);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The journal: a version line, then the paths the commit leaves out.
+fn journal_bytes(skip: &HashSet<PathBuf>) -> Vec<u8> {
+    let mut paths: Vec<&PathBuf> = skip.iter().collect();
+    paths.sort();
+    let mut out = b"foil-commit 1\n".to_vec();
+    for path in paths {
+        out.extend_from_slice(path.as_os_str().as_bytes());
+        out.push(0);
+    }
+    out
+}
+
+fn read_journal(raw: &[u8]) -> io::Result<HashSet<PathBuf>> {
+    let rest = raw
+        .strip_prefix(b"foil-commit 1\n")
+        .ok_or_else(|| invalid("unreadable commit journal; abort the branch with --force".to_owned()))?;
+    Ok(rest.split(|&b| b == 0).filter(|p| !p.is_empty()).map(|p| PathBuf::from(OsStr::from_bytes(p))).collect())
+}
+
+/// Write `bytes` to `path` so that after a crash it holds all of them or
+/// does not exist: a temporary file, synced, renamed, and the folder synced.
+fn write_durably(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    let mut file = File::create(&tmp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    fs::rename(&tmp, path)?;
+    File::open(path.parent().unwrap_or(Path::new("/")))?.sync_all()
+}
+
+/// Flush everything written to the file system that holds `path`.
+fn sync_fs(path: &Path) -> io::Result<()> {
+    let dir = File::open(path)?;
+    // SAFETY: syncfs on a descriptor we own.
+    if unsafe { libc::syncfs(dir.as_raw_fd()) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// 64-bit FNV-1a: a stable, dependency-free hash for lock file names.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3))
+}
+
+/// Test builds only: `FOIL_TEST_CRASH_AFTER=N` kills foil (SIGKILL, like a
+/// crash) right after the Nth change a commit applies.
+fn crash_point() {
+    #[cfg(debug_assertions)]
+    {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static DONE: AtomicUsize = AtomicUsize::new(0);
+        let Some(limit) = std::env::var("FOIL_TEST_CRASH_AFTER").ok().and_then(|v| v.parse::<usize>().ok()) else {
+            return;
+        };
+        if DONE.fetch_add(1, Ordering::SeqCst) + 1 >= limit {
+            // SAFETY: sends a signal to ourselves.
+            unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
+        }
+    }
 }
 
 /// Overlayfs records a deleted file as a character device with number 0:0.

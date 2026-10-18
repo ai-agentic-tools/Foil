@@ -47,7 +47,9 @@ usage: foil run [options] [--] <command> [args...]
                                apply branch NAME to its workspace, then delete it;
                                refuses files changed there since, unless --force;
                                leaves out ignored paths (build output), unless --all
-       foil abort NAME         delete branch NAME; the workspace is untouched
+       foil abort [--force] NAME
+                               delete branch NAME; the workspace is untouched
+                               (--force: also after an interrupted commit)
        foil list [--json]      list branches and their workspaces
        foil doctor             check what works on this machine
        foil setup [--print]    allow foil to use user namespaces (Ubuntu; as root)
@@ -83,8 +85,9 @@ fn main() {
             }))
         }
         Some("abort") => {
-            let (_, name) = flags_and_name(rest, &[]);
-            finish(Branch::open(&name).and_then(Branch::abort))
+            let (flags, name) = flags_and_name(rest, &["--force"]);
+            let force = flags.contains(&"--force");
+            finish(Branch::open(&name).and_then(|b| b.abort(force)))
         }
         Some("list") => list(rest),
         Some("doctor") => match foil::doctor::doctor() {
@@ -445,7 +448,7 @@ fn summarize(name: &str, termination: Termination) {
     let (changes, _) = branch.changes(false).unwrap_or_default();
     if changes.is_empty() {
         eprintln!("foil: no changes in branch {name}; removing it.");
-        let _ = branch.abort();
+        let _ = branch.abort(false);
         return;
     }
     eprintln!("foil: branch {name} changed {} paths in {}:", changes.len(), branch.workspace.display());
@@ -469,7 +472,7 @@ fn summarize(name: &str, termination: Termination) {
             Ok(n) => eprintln!("foil: applied {n} changes"),
             Err(err) => eprintln!("foil: {err}"),
         },
-        "a" | "abort" => match branch.abort() {
+        "a" | "abort" => match branch.abort(false) {
             Ok(()) => eprintln!("foil: branch {name} discarded"),
             Err(err) => eprintln!("foil: {err}"),
         },

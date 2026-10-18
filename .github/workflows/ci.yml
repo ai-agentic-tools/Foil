@@ -72,10 +72,16 @@ jobs:
           else
             echo "no bench/baseline-ci.json yet: commit this run's foilbench.json as the baseline"
           fi
+      - name: Show the numbers
+        run: cat foilbench.json
+      # Uploads can fail when the account's artifact quota is full; the
+      # numbers are in the log above either way.
       - uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: foilbench
           path: foilbench.json
+          retention-days: 7
 
   # The same suite inside a Docker container, with the settings from
   # contrib/docker/README.md.
@@ -104,6 +110,8 @@ jobs:
           sudo apt-get install -y musl-tools
           cargo build --release --target x86_64-unknown-linux-musl
       - uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: foil-x86_64-linux
           path: target/x86_64-unknown-linux-musl/release/foil
+          retention-days: 7

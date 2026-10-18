@@ -38,14 +38,24 @@ fn limits_are_set_on_the_runs_cgroup() {
     if !available() {
         return;
     }
+    // Older systemd (Ubuntu 22.04's 249) does not delegate the cpu
+    // controller to user managers by default: then --cpus must fail with a
+    // clear explanation, and the other limits must still work.
+    let cpu = run(&["--cpus", "1"], "true");
+    let cpu_delegated = cpu.status.success();
+    if !cpu_delegated {
+        assert!(text(&cpu.stderr).contains("did not apply the cpu limit"), "{}", text(&cpu.stderr));
+    }
     // The command sits in foil's box; the limits are on the scope around it.
-    let out = run(
-        &["--memory", "64M", "--cpus", "0.5", "--pids", "50"],
-        "cd /sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/.. && cat memory.max memory.swap.max cpu.max pids.max",
-    );
+    let (flags, files, want): (&[&str], &str, &str) = if cpu_delegated {
+        (&["--memory", "64M", "--cpus", "0.5", "--pids", "50"], "memory.max memory.swap.max cpu.max pids.max", "67108864\n0\n50000 100000\n50\n")
+    } else {
+        (&["--memory", "64M", "--pids", "50"], "memory.max memory.swap.max pids.max", "67108864\n0\n50\n")
+    };
+    let out = run(flags, &format!("cd /sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/.. && cat {files}"));
 
     assert!(out.status.success(), "{}", text(&out.stderr));
-    assert_eq!(text(&out.stdout), "67108864\n0\n50000 100000\n50\n");
+    assert_eq!(text(&out.stdout), want);
 }
 
 #[test]

@@ -109,6 +109,26 @@ fn operation_kind(rng: &mut Rng, kinds: &[usize]) -> String {
     }
 }
 
+/// The ctime of every path in the tree (read-only), to locate a change
+/// that a conflict check reports.
+fn ctimes(root: &Path) -> String {
+    use std::os::unix::fs::MetadataExt;
+    let mut out = String::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.path().symlink_metadata() else { continue };
+            let rel = entry.path().strip_prefix(root).unwrap().to_path_buf();
+            out.push_str(&format!("{}.{:09} {}\n", meta.ctime(), meta.ctime_nsec(), rel.display()));
+            if meta.is_dir() {
+                stack.push(entry.path());
+            }
+        }
+    }
+    out
+}
+
 /// Every path that differs between two snapshots.
 fn changed(a: &std::collections::BTreeMap<PathBuf, common::Node>, b: &std::collections::BTreeMap<PathBuf, common::Node>) -> BTreeSet<PathBuf> {
     let keys: BTreeSet<&PathBuf> = a.keys().chain(b.keys()).collect();
@@ -136,6 +156,8 @@ fn run_case(seed: u64) -> Result<(), String> {
     let before = snapshot_untouched(&env.ws());
     let want = snapshot(&reference);
 
+    let at_setup = ctimes(&env.ws());
+    let mut after_runs = Vec::new();
     for part in [&ops[..split], &ops[split..]] {
         if part.is_empty() {
             continue;
@@ -144,6 +166,7 @@ fn run_case(seed: u64) -> Result<(), String> {
         if !out.status.success() {
             return Err(report(format!("foil run failed: {}", text(&out.stderr))));
         }
+        after_runs.push(ctimes(&env.ws()));
     }
     let now = snapshot_untouched(&env.ws());
     if now != before {
@@ -170,7 +193,17 @@ fn run_case(seed: u64) -> Result<(), String> {
 
     let out = env.foil(&["commit", "--all", "t"]).output().unwrap();
     if !out.status.success() {
-        return Err(report(format!("commit failed: {}", text(&out.stderr))));
+        // For a conflict, show the times it was judged by.
+        use std::os::unix::fs::MetadataExt;
+        let marker = std::fs::symlink_metadata(env.root.join("home/branches/t/workspace")).unwrap();
+        return Err(report(format!(
+            "commit failed: {}\nbranch created (mtime) {}.{:09}\n--- ctimes after setup ---\n{at_setup}--- after each run ---\n{}--- now ---\n{}",
+            text(&out.stderr),
+            marker.mtime(),
+            marker.mtime_nsec(),
+            after_runs.join("---\n"),
+            ctimes(&env.ws())
+        )));
     }
     let got = snapshot(&env.ws());
     if got != want {

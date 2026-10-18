@@ -341,12 +341,19 @@ impl Branch {
     /// Paths the branch changed that were also changed in the workspace
     /// since the branch was created, e.g. by another branch's commit.
     /// Judged by ctime, which (unlike mtime) cannot be set back by hand.
+    ///
+    /// "At or after" the branch's creation, not strictly after: the kernel
+    /// stamps most changes with a coarse clock that only advances every
+    /// tick (a few milliseconds), so a change made right after the branch
+    /// can carry the very same time. Counting equal times as conflicts can
+    /// flag a change made in the same tick just before the branch, which is
+    /// the safe mistake; the other one silently overwrites someone's work.
     pub fn conflicts(&self, all: bool) -> io::Result<Vec<PathBuf>> {
         let created = self.created()?;
         let mut conflicts = Vec::new();
         for change in self.changes(all)?.0 {
             let changed_since = match self.workspace.join(&change.path).symlink_metadata() {
-                Ok(meta) => ctime(&meta) > created,
+                Ok(meta) => ctime(&meta) >= created,
                 // Gone now: deleted on both sides is no conflict; otherwise it is.
                 Err(_) => change.kind != ChangeKind::Deleted && change.kind != ChangeKind::Added,
             };

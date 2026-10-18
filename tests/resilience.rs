@@ -305,3 +305,31 @@ fn a_workspace_inside_an_ignored_folder_still_commits() {
     assert_eq!(std::fs::read_to_string(env.ws().join("a.txt")).unwrap(), "changed\n");
     assert_eq!(std::fs::read_to_string(env.ws().join("b.txt")).unwrap(), "new\n");
 }
+
+/// A workspace change made right after the branch was created must still
+/// count as a conflict. Timestamps can lag by a clock tick (coarse
+/// timestamps), so this changes the file the moment the branch exists, many
+/// times over, to land inside that window.
+#[test]
+fn a_change_right_after_the_branch_is_made_is_still_a_conflict() {
+    if !branches_available() {
+        return;
+    }
+    let mut missed = Vec::new();
+    for i in 0..40 {
+        let env = Env::new("tick");
+        std::fs::write(env.ws().join("x"), "base\n").unwrap();
+        let mut run = env.foil(&["run", "-b", "t", "--", "sh", "-c", "sleep 0.2; echo branch > x"]).spawn().unwrap();
+        let marker = env.root.join("home/branches/t/workspace");
+        while !marker.exists() {
+            std::hint::spin_loop();
+        }
+        std::fs::write(env.ws().join("x"), "outside\n").unwrap();
+        assert!(run.wait().unwrap().success());
+        let out = env.foil(&["commit", "t"]).output().unwrap();
+        if out.status.success() {
+            missed.push(i);
+        }
+    }
+    assert!(missed.is_empty(), "the outside change was overwritten without a conflict in rounds {missed:?}");
+}

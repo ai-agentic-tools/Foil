@@ -64,7 +64,7 @@ jobs:
           cargo build --release
           sudo target/release/foil setup
       - name: foilbench
-        run: FOIL=target/release/foil python3 bench/foilbench.py --quick --out foilbench.json
+        run: FOIL=$PWD/target/release/foil python3 bench/foilbench.py --quick --out foilbench.json
       - name: Gate against the CI baseline
         run: |
           if [ -f bench/baseline-ci.json ]; then

@@ -480,11 +480,29 @@ fn summarize(name: &str, termination: Termination) {
     }
 }
 
+/// Remove the proxy folders of foils that are gone (killed before they
+/// could clean up): ours only, and only if no process has that PID.
+fn sweep_proxy_dirs() {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else { return };
+    // SAFETY: getuid has no preconditions.
+    let me = unsafe { libc::getuid() };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|n| n.strip_prefix("foil-proxy-")) else { continue };
+        let alive = pid.parse::<u32>().is_ok_and(|p| std::path::Path::new(&format!("/proc/{p}")).exists());
+        if !alive && entry.metadata().is_ok_and(|m| m.uid() == me && m.is_dir()) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 /// Start `foil __proxy` on a socket in a fresh private folder; return the
 /// folder and the process once the socket accepts connections.
 fn start_proxy(allow: &[String], inject: &[String]) -> std::io::Result<(PathBuf, std::process::Child)> {
     use std::os::unix::fs::DirBuilderExt;
     use std::os::unix::process::CommandExt;
+    sweep_proxy_dirs();
     let dir = std::env::temp_dir().join(format!("foil-proxy-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::DirBuilder::new().mode(0o700).create(&dir)?;

@@ -14,6 +14,9 @@ use std::path::{Path, PathBuf};
 
 use common::{branches_available, copy_tree, differences, snapshot, snapshot_untouched, text, Env};
 
+/// Refusals explained by a lagging coarse clock (see run_case).
+static CLOCK_REFUSALS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// xorshift64*: small, deterministic, good enough to pick operations.
 struct Rng(u64);
 
@@ -191,7 +194,25 @@ fn run_case(seed: u64) -> Result<(), String> {
         }
     }
 
-    let out = env.foil(&["commit", "--all", "t"]).output().unwrap();
+    let mut out = env.foil(&["commit", "--all", "t"]).output().unwrap();
+    // A refusal is accepted only when every path it names was already
+    // stamped before the branch existed and has not changed since: then the
+    // stamp was ahead of the branch's (a coarse clock lagging, seen on
+    // tickless kernels), and refusing is foil's safe mistake. Anything else
+    // is a real failure.
+    if !out.status.success() && text(&out.stderr).contains("also changed") {
+        let named: Vec<String> = text(&out.stderr).lines().filter_map(|l| l.strip_prefix("  ").map(str::to_owned)).collect();
+        let now_times = ctimes(&env.ws());
+        let stamp_of = |trace: &str, path: &str| trace.lines().find(|l| l.split_once(' ').is_some_and(|(_, p)| p == path)).map(str::to_owned);
+        let explained = !named.is_empty()
+            && named.iter().all(|p| stamp_of(&at_setup, p).is_some() && stamp_of(&at_setup, p) == stamp_of(&now_times, p));
+        if explained {
+            out = env.foil(&["commit", "--all", "--force", "t"]).output().unwrap();
+            if out.status.success() {
+                CLOCK_REFUSALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
     if !out.status.success() {
         // For a conflict, show the times it was judged by.
         use std::os::unix::fs::MetadataExt;
@@ -223,5 +244,6 @@ fn branches_behave_like_a_plain_copy() {
     let cases: u64 = std::env::var("FOIL_DIFF_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
     let first: u64 = std::env::var("FOIL_DIFF_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
     let failures: Vec<String> = (first..first + cases).filter_map(|seed| run_case(seed).err()).take(3).collect();
+    eprintln!("refusals explained by clock lag: {}", CLOCK_REFUSALS.load(std::sync::atomic::Ordering::Relaxed));
     assert!(failures.is_empty(), "{} failing case(s), first ones:\n\n{}", failures.len(), failures.join("\n\n"));
 }

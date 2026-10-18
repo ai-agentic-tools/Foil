@@ -231,6 +231,12 @@ impl Branch {
     /// repository. Files git tracks are never reported, even if a pattern
     /// matches them.
     fn ignored(&self, changes: &[Change]) -> HashSet<PathBuf> {
+        // A workspace that is itself ignored by an enclosing repository (a
+        // scratch folder under `target/`, say) is not a project of that
+        // repository: its rules would drop every change.
+        if self.workspace_is_ignored() {
+            return HashSet::new();
+        }
         let mut input = Vec::new();
         for change in changes {
             input.extend_from_slice(change.path.as_os_str().as_bytes());
@@ -267,6 +273,22 @@ impl Branch {
             .filter(|p| !p.is_empty())
             .map(|p| PathBuf::from(OsStr::from_bytes(p.strip_suffix(b"/").unwrap_or(p))))
             .collect()
+    }
+
+    /// Whether git ignores the workspace folder itself.
+    fn workspace_is_ignored(&self) -> bool {
+        let (Some(parent), Some(name)) = (self.workspace.parent(), self.workspace.file_name()) else {
+            return false;
+        };
+        Command::new("git")
+            .arg("-C")
+            .arg(parent)
+            .args(["check-ignore", "-q", "--"])
+            .arg(name)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
     }
 
     /// Every change this branch would make to its workspace, in path order.

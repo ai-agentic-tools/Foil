@@ -288,3 +288,20 @@ fn folders_and_files_without_permissions_still_diff_and_commit() {
     let (got, want) = (snapshot(&env.ws()), snapshot(&reference));
     assert!(got == want, "{}", differences(&got, &want).join("\n"));
 }
+
+/// Found by CI: a workspace inside a folder an enclosing git repository
+/// ignores (here `ws/`) had every change dropped by commit, silently.
+#[test]
+fn a_workspace_inside_an_ignored_folder_still_commits() {
+    if !branches_available() {
+        return;
+    }
+    let env = Env::new("ignored-ws");
+    assert!(Env::sh(&env.root, "git init -q . && printf 'ws/\\nhome/\\n' > .gitignore").status.success());
+    assert!(Env::sh(&env.ws(), "echo base > a.txt").status.success());
+    assert!(env.run("t", "echo changed > a.txt && echo new > b.txt").status.success());
+    let out = env.foil(&["commit", "t"]).output().unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(std::fs::read_to_string(env.ws().join("a.txt")).unwrap(), "changed\n");
+    assert_eq!(std::fs::read_to_string(env.ws().join("b.txt")).unwrap(), "new\n");
+}

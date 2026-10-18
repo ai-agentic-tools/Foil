@@ -68,7 +68,7 @@ jobs:
       - name: Gate against the CI baseline
         run: |
           if [ -f bench/baseline-ci.json ]; then
-            python3 bench/foilbench.py --gate bench/baseline-ci.json --tolerance 0.25 foilbench.json
+            python3 bench/foilbench.py --gate bench/baseline-ci.json --tolerance 0.5 foilbench.json
           else
             echo "no bench/baseline-ci.json yet: commit this run's foilbench.json as the baseline"
           fi

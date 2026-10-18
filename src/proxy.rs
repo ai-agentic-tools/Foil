@@ -111,6 +111,11 @@ pub fn sandbox_env(port: u16, inject: &[String]) -> Vec<(String, String)> {
 /// `host:port`, `*.domain` (any subdomain) or `*` (anything); without a
 /// port only 80 and 443 are allowed.
 pub fn allowed(allow: &[String], host: &str, port: u16) -> bool {
+    // Only real host names and IP addresses: odd characters ('@', '/', '%',
+    // spaces) could make a name match a pattern and then mean another host.
+    if !valid_host(host) {
+        return false;
+    }
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     allow.iter().any(|entry| {
         let entry = entry.to_ascii_lowercase();
@@ -127,6 +132,24 @@ pub fn allowed(allow: &[String], host: &str, port: u16) -> bool {
             || pattern.strip_prefix("*.").is_some_and(|d| host.ends_with(&format!(".{d}")));
         port_ok && host_ok
     })
+}
+
+/// A DNS name (letters, digits, '-' and '.', 1-253 bytes, no empty label)
+/// or an IPv4 or IPv6 address.
+pub fn valid_host(host: &str) -> bool {
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    let name = host.strip_suffix('.').unwrap_or(host);
+    !name.is_empty()
+        && name.len() <= 253
+        && name.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
 }
 
 struct Config {
@@ -183,9 +206,25 @@ struct Head {
     headers: Vec<(String, String)>,
 }
 
+/// Read one line of at most `limit` bytes (the excess is an error, not memory).
+fn read_line_limited(reader: &mut BufReader<UnixStream>, out: &mut String, limit: usize) -> io::Result<usize> {
+    let mut bytes = Vec::new();
+    let n = reader.by_ref().take(limit as u64 + 1).read_until(b'\n', &mut bytes)?;
+    if n > limit {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "request head too large"));
+    }
+    // Control characters other than the line end could split a header in two upstream.
+    let line = String::from_utf8(bytes).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "request head is not text"))?;
+    if line.trim_end_matches(['\r', '\n']).bytes().any(|b| b < 0x20 && b != b'\t' || b == 0x7f) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "control character in request head"));
+    }
+    out.push_str(&line);
+    Ok(n)
+}
+
 fn read_head(reader: &mut BufReader<UnixStream>) -> io::Result<Head> {
     let mut line = String::new();
-    reader.read_line(&mut line)?;
+    read_line_limited(reader, &mut line, 16 * 1024)?;
     let mut parts = line.split_whitespace();
     let (Some(method), Some(target)) = (parts.next(), parts.next()) else {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "bad request line"));
@@ -195,7 +234,7 @@ fn read_head(reader: &mut BufReader<UnixStream>) -> io::Result<Head> {
     let mut total = line.len();
     loop {
         let mut h = String::new();
-        if reader.read_line(&mut h)? == 0 {
+        if read_line_limited(reader, &mut h, 16 * 1024)? == 0 {
             break;
         }
         total += h.len();
@@ -409,6 +448,26 @@ mod tests {
         assert!(!allowed(&allow, "127.0.0.1", 443));
         assert!(!allowed(&[], "anything", 443));
         assert!(allowed(&["*".to_owned()], "anything", 443));
+    }
+
+    #[test]
+    fn odd_host_names_never_match() {
+        let allow: Vec<String> = ["*.allowed.test", "*"].map(String::from).to_vec();
+        for host in [
+            "evil.com/.allowed.test",
+            "evil.com@x.allowed.test",
+            "evil.com%2f.allowed.test",
+            "evil.com .allowed.test",
+            "evil.com\0.allowed.test",
+            "x..allowed.test",
+            "-x.allowed.test",
+            "",
+            ".",
+        ] {
+            assert!(!allowed(&allow, host, 443), "{host:?} matched");
+        }
+        assert!(valid_host("a-b.allowed.test") && valid_host("10.0.0.1") && valid_host("::1") && valid_host("x.test."));
+        assert!(!valid_host(&"a".repeat(64)) && !valid_host(&format!("{}.test", "a.".repeat(130))));
     }
 
     #[test]

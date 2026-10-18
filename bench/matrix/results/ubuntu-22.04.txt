@@ -1,0 +1,36 @@
+## system
+5.15.0-194-generic
+Ubuntu 22.04.5 LTS
+debconf: unable to initialize frontend: Dialog
+debconf: (Dialog frontend will not work on a dumb terminal, an emacs shell buffer, or without a controlling terminal.)
+debconf: falling back to frontend: Readline
+debconf: unable to initialize frontend: Readline
+debconf: (This frontend requires a controlling tty.)
+debconf: falling back to frontend: Teletype
+dpkg-preconfigure: unable to re-open stdin: 
+## build
+## setup
+nothing to do: this system does not restrict user namespaces
+## doctor
+ok  kernel        Linux 5.15.0-194-generic (branches need >= 5.11, --protect >= 5.12)
+ok  cleanup box   branch, isolated and limited runs get one through a systemd scope (~12 ms); plain `foil run` falls back to subreaper cleanup
+ok  branches      copy-on-write branches work (stored in /home/sandeep.guest/.local/share/foil)
+ok  --protect     read-only view of everything outside the workspace works
+ok  --strict      deny-by-default view, PID/IPC isolation, no privilege gain work
+ok  --no-network  network isolation works
+ok  limits        --memory/--cpus/--pids via systemd (controllers: cpuset cpu io memory pids)
+## tests (FOIL_REQUIRE_BRANCH=1)
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.21s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 111.96s
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.55s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.29s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.97s
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.49s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.01s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+## done

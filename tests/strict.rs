@@ -280,6 +280,172 @@ fn cannot_reach_local_services_or_host_tmp() {
     assert_eq!(text(&out.stdout), "xdg= ssh=\n", "{}", text(&out.stderr));
 }
 
+/// A listener on the host's loopback that counts connections and answers
+/// nothing useful; for checking that a forbidden host is never contacted.
+fn listen_counting(count: &'static AtomicUsize) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for conn in listener.incoming().flatten() {
+            count.fetch_add(1, Ordering::SeqCst);
+            let mut conn = conn;
+            let _ = conn.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nforbidden");
+        }
+    });
+    port
+}
+
+/// Send `raw` bytes to foil's proxy from inside a strict run; print the reply.
+const RAW_TO_PROXY: &str = r#"import socket, sys
+s = socket.create_connection(("127.0.0.1", 3128)); s.settimeout(5)
+s.sendall(sys.argv[1].encode("latin-1").decode("unicode_escape").encode("latin-1"))
+out = b""
+try:
+    while True:
+        d = s.recv(4096)
+        if not d: break
+        out += d
+except Exception: pass
+print(out.decode("latin-1").split("\r\n")[0])"#;
+
+#[test]
+fn cannot_find_the_key_anywhere_in_proc() {
+    if !available() || !has("python3") {
+        return;
+    }
+    let env = Env::new("procscan");
+    // `sk-real-ke[y]` matches the key but not this script's own command line.
+    let script = "grep -l 'sk-real-ke[y]' /proc/[0-9]*/environ /proc/[0-9]*/cmdline 2>/dev/null; \
+                  grep -rl 'sk-real-ke[y]' /run /tmp 2>/dev/null; echo scanned";
+    let out = env.cmd(&["--inject-key", "anthropic"], script).env("ANTHROPIC_API_KEY", "sk-real-key").output().unwrap();
+    assert_eq!(text(&out.stdout), "scanned\n", "the key was found here: {}", text(&out.stdout));
+}
+
+#[test]
+fn cannot_reach_host_abstract_unix_sockets() {
+    if !available() || !has("python3") {
+        return;
+    }
+    let env = Env::new("abstract");
+    let name = format!("foil-test-{}", std::process::id());
+    let mut host = Command::new("python3")
+        .args(["-c", &format!("import socket,time; s=socket.socket(socket.AF_UNIX); s.bind('\\0{name}'); s.listen(); time.sleep(20)")])
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    let script = format!(
+        "python3 -c \"import socket; s=socket.socket(socket.AF_UNIX); s.connect('\\0{name}'); print('CONNECTED')\" 2>/dev/null || echo refused"
+    );
+    let out = env.run(&[], &script);
+    let _ = host.kill();
+    let _ = host.wait();
+    assert_eq!(text(&out.stdout), "refused\n", "{}", text(&out.stderr));
+}
+
+#[test]
+fn cannot_uncover_hidden_files_with_a_nested_namespace() {
+    if !available() || !has("unshare") {
+        return;
+    }
+    let env = Env::new("nested");
+    let script = format!(
+        "unshare -Urm sh -c 'umount -l {home} 2>/dev/null; umount -l / 2>/dev/null; mount -t proc proc /proc 2>/dev/null; \
+         cat {home}/.ssh/id_ed25519 {other}/secret.txt 2>/dev/null; ls -A {home}' 2>/dev/null; echo done",
+        home = env.path("home"),
+        other = env.path("other")
+    );
+    let out = env.run(&[], &script);
+    let stdout = text(&out.stdout);
+    assert!(!stdout.contains("PRIVATE KEY") && !stdout.contains("other repo secret"), "{stdout}");
+}
+
+#[test]
+fn cannot_open_raw_devices_or_change_the_kernel() {
+    if !available() {
+        return;
+    }
+    let env = Env::new("devices");
+    let script = "for d in /dev/mem /dev/kmem /dev/kmsg /dev/sda /dev/vda /dev/nvme0n1 /dev/port; do \
+                    head -c1 $d >/dev/null 2>&1 && echo OPENED $d; done; \
+                  echo 1 > /proc/sys/kernel/sysrq 2>/dev/null && echo SYSCTL; \
+                  echo x > /sys/kernel/foil 2>/dev/null && echo SYSFS; \
+                  mount -t tmpfs t /mnt 2>/dev/null && echo MOUNTED; echo done";
+    let out = env.run(&[], script);
+    assert_eq!(text(&out.stdout), "done\n", "{}", text(&out.stderr));
+}
+
+#[test]
+fn cannot_write_through_a_workspace_symlink_to_outside() {
+    if !available() {
+        return;
+    }
+    let env = Env::new("symlink-out");
+    std::os::unix::fs::symlink(env.root.join("home/.ssh"), env.root.join("ws/escape")).unwrap();
+    let out = env.run(&["-b", "t"], "echo pwned > escape/authorized_keys 2>/dev/null; echo done");
+    assert_eq!(text(&out.stdout), "done\n");
+    assert!(!env.root.join("home/.ssh/authorized_keys").exists(), "wrote through the symlink");
+}
+
+#[test]
+fn commit_does_not_follow_a_symlink_the_branch_replaced() {
+    if !available() {
+        return;
+    }
+    let env = Env::new("symlink-commit");
+    std::os::unix::fs::symlink(env.root.join("other"), env.root.join("ws/d")).unwrap();
+    let out = env.run(&["-b", "t"], "rm d && mkdir d && echo x > d/planted");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let commit = Command::new(env!("CARGO_BIN_EXE_foil"))
+        .args(["commit", "t"])
+        .current_dir(env.root.join("ws"))
+        .env("FOIL_HOME", env.root.join("branches"))
+        .output()
+        .unwrap();
+    assert!(commit.status.success(), "{}", text(&commit.stderr));
+    assert!(!env.root.join("other/planted").exists(), "commit wrote through the old symlink");
+    assert!(env.root.join("ws/d").symlink_metadata().unwrap().is_dir());
+}
+
+#[test]
+fn the_proxy_refuses_smuggled_and_disguised_requests() {
+    if !available() || !has("python3") {
+        return;
+    }
+    static FORBIDDEN: AtomicUsize = AtomicUsize::new(0);
+    let env = Env::new("smuggle");
+    let allowed = serve_once(|_| "allowed-body".to_owned());
+    let other = listen_counting(&FORBIDDEN);
+    let attempts = [
+        // userinfo: "allowed@forbidden"
+        format!("GET http://127.0.0.1:{allowed}@127.0.0.1:{other}/ HTTP/1.1\\r\\n\\r\\n"),
+        // a Host header naming the forbidden host
+        format!("GET http://127.0.0.1:{allowed}/ HTTP/1.1\\r\\nHost: 127.0.0.1:{other}\\r\\n\\r\\n"),
+        // a second request pipelined behind an allowed one
+        format!("GET http://127.0.0.1:{allowed}/ HTTP/1.1\\r\\nContent-Length: 0\\r\\n\\r\\nGET http://127.0.0.1:{other}/ HTTP/1.1\\r\\n\\r\\n"),
+        // a header with a bare CR, to split the request upstream
+        format!("GET http://127.0.0.1:{allowed}/ HTTP/1.1\\r\\nX: a\\rHost: 127.0.0.1:{other}\\r\\n\\r\\n"),
+        // CONNECT to an allowed host but another port
+        format!("CONNECT 127.0.0.1:{other} HTTP/1.1\\r\\n\\r\\n"),
+        // a name that ends like an allowed domain
+        "CONNECT evil.example/.allowed.test:443 HTTP/1.1\\r\\n\\r\\n".to_owned(),
+        // an absurdly long header line
+        format!("GET http://127.0.0.1:{allowed}/ HTTP/1.1\\r\\nX: {}\\r\\n\\r\\n", "a".repeat(100_000)),
+    ];
+    let mut script = String::new();
+    for attempt in &attempts {
+        script.push_str(&format!("python3 -c '{}' '{}'; ", RAW_TO_PROXY.replace('\'', "'\\''"), attempt));
+    }
+    let out = env.run(&["--allow-host", &format!("127.0.0.1:{allowed}"), "--allow-host", "*.allowed.test"], &script);
+    std::thread::sleep(Duration::from_millis(200));
+    // Every attempt really reached the proxy and got an answer line.
+    assert_eq!(text(&out.stdout).lines().count(), attempts.len(), "{}\n{}", text(&out.stdout), text(&out.stderr));
+    eprintln!("replies:\n{}", text(&out.stdout));
+    assert_eq!(FORBIDDEN.load(Ordering::SeqCst), 0, "the forbidden host was contacted:\n{}\n{}", text(&out.stdout), text(&out.stderr));
+    assert!(!text(&out.stdout).contains("forbidden"), "{}", text(&out.stdout));
+    // Refused by the proxy's own check, not only by DNS failing afterwards.
+    assert!(text(&out.stderr).contains("blocked network access to evil.example/.allowed.test"), "{}", text(&out.stderr));
+}
+
 // ---------------------------------------------------------------- still works
 
 #[test]

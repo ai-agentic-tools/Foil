@@ -576,8 +576,9 @@ fn apply(
                 }
                 None => {
                     fs::copy(&from, &tmp)?;
-                    fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
+                    // Before the mode: setting a user xattr needs write permission.
                     copy_xattrs(&from, &tmp)?;
+                    fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
                     if meta.nlink() > 1 {
                         links.insert((meta.dev(), meta.ino()), to.clone());
                     }

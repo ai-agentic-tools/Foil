@@ -92,15 +92,26 @@ pub enum Node {
 
 /// Every path under `root` (relative) with what a commit must reproduce:
 /// type, permission bits, content, symlink target, user xattrs, and which
-/// names share a file. Not times or owners.
+/// names share a file. Not times or owners. Folders we may not list are
+/// opened for a moment, which changes their ctime: use `snapshot_untouched`
+/// where that matters (a workspace whose branch is not committed yet).
 pub fn snapshot(root: &Path) -> BTreeMap<PathBuf, Node> {
     let mut out = BTreeMap::new();
     let mut inodes: HashMap<(u64, u64), PathBuf> = HashMap::new();
-    walk(root, Path::new(""), &mut out, &mut inodes);
+    walk(root, Path::new(""), &mut out, &mut inodes, true);
     out
 }
 
-fn walk(root: &Path, rel: &Path, out: &mut BTreeMap<PathBuf, Node>, inodes: &mut HashMap<(u64, u64), PathBuf>) {
+/// Like `snapshot`, but changes nothing: a folder we may not list is
+/// recorded without its contents.
+pub fn snapshot_untouched(root: &Path) -> BTreeMap<PathBuf, Node> {
+    let mut out = BTreeMap::new();
+    let mut inodes: HashMap<(u64, u64), PathBuf> = HashMap::new();
+    walk(root, Path::new(""), &mut out, &mut inodes, false);
+    out
+}
+
+fn walk(root: &Path, rel: &Path, out: &mut BTreeMap<PathBuf, Node>, inodes: &mut HashMap<(u64, u64), PathBuf>, open: bool) {
     let mut entries: Vec<_> = std::fs::read_dir(root.join(rel)).unwrap().map(|e| e.unwrap()).collect();
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
@@ -112,11 +123,13 @@ fn walk(root: &Path, rel: &Path, out: &mut BTreeMap<PathBuf, Node>, inodes: &mut
         let node = if kind.is_dir() {
             // Read a directory we can't list by making it listable first.
             let restore = mode & 0o500 != 0o500;
-            if restore {
+            if restore && open {
                 std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(mode | 0o700)).unwrap();
             }
-            walk(root, &rel, out, inodes);
-            if restore {
+            if !restore || open {
+                walk(root, &rel, out, inodes, open);
+            }
+            if restore && open {
                 std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(mode)).unwrap();
             }
             Node::Dir { mode, xattrs: xattrs(&path) }

@@ -12,7 +12,7 @@ mod common;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use common::{branches_available, copy_tree, differences, snapshot, text, Env};
+use common::{branches_available, copy_tree, differences, snapshot, snapshot_untouched, text, Env};
 
 /// xorshift64*: small, deterministic, good enough to pick operations.
 struct Rng(u64);
@@ -132,7 +132,8 @@ fn run_case(seed: u64) -> Result<(), String> {
     let reference = env.root.join("reference");
     copy_tree(&env.ws(), &reference);
     Env::sh(&reference, &script);
-    let before = snapshot(&env.ws());
+    // Untouched: opening a folder would change its ctime and fake a conflict.
+    let before = snapshot_untouched(&env.ws());
     let want = snapshot(&reference);
 
     for part in [&ops[..split], &ops[split..]] {
@@ -144,7 +145,7 @@ fn run_case(seed: u64) -> Result<(), String> {
             return Err(report(format!("foil run failed: {}", text(&out.stderr))));
         }
     }
-    let now = snapshot(&env.ws());
+    let now = snapshot_untouched(&env.ws());
     if now != before {
         return Err(report(format!("the workspace changed before commit:\n{}", differences(&now, &before).join("\n"))));
     }

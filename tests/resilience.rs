@@ -267,7 +267,11 @@ fn folders_and_files_without_permissions_still_diff_and_commit() {
     }
     let env = Env::new("noperm");
     assert!(Env::sh(&env.ws(), "mkdir closed && echo a > closed/a && echo s > secret").status.success());
-    let edits = "echo b > closed/b && chmod 000 closed && echo t > secret && chmod 000 secret && mkdir -p new && echo n > new/n && chmod 311 new";
+    // The xattr before the chmod: found by the differential test, commit
+    // set the mode first and then could not write the xattr.
+    let edits = "echo b > closed/b && chmod 000 closed && echo t > secret \
+        && python3 -c \"import os; os.setxattr('secret', 'user.k', b'v')\" && chmod 000 secret \
+        && mkdir -p new && echo n > new/n && chmod 311 new";
     assert!(env.run("t", edits).status.success());
     let reference = env.root.join("reference");
     copy_tree(&env.ws(), &reference);

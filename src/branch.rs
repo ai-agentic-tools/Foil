@@ -23,16 +23,17 @@
 //! overlay; the next foil to take the branch's lock kills them first.
 
 use std::collections::{HashMap, HashSet};
-use std::ffi::OsStr;
+use std::ffi::{CString, OsStr};
 use std::fs::{self, File};
 use std::io::{self, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{symlink, FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::SystemTime;
 
+use crate::at;
 use crate::cgroup;
 use crate::isolate::{c_path, Overlay};
 
@@ -421,7 +422,8 @@ impl Branch {
             Err(err) => return Err(err),
         };
         let mut links = HashMap::new();
-        let applied = apply(&self.upper(), &self.workspace, Path::new(""), &skip, &mut links, &access).map_err(|err| {
+        let root = at::open_dir(&self.workspace)?;
+        let applied = apply(&self.upper(), &root, Path::new(""), &skip, &mut links, &access).map_err(|err| {
             io::Error::new(
                 err.kind(),
                 format!(
@@ -558,93 +560,106 @@ fn resolve(path: &Path) -> io::Result<PathBuf> {
     Ok(resolved)
 }
 
-/// Copy the changes recorded in `upper` onto `target`, depth first,
-/// leaving out the paths in `skip` (relative to the workspace; `rel` is
-/// where `upper` sits). Returns the number of changes applied. Applying
-/// twice gives the same result, which is what lets a commit be resumed.
-/// `links` remembers files with several names in the branch (hard links),
-/// so they are linked in the workspace too instead of copied apart.
+/// Copy the changes recorded in `upper` onto the directory `dir` (open,
+/// inside the workspace), depth first, leaving out the paths in `skip`
+/// (relative to the workspace; `rel` is where `upper` sits). Returns the
+/// number of changes applied. Every step is relative to an open directory
+/// and never follows a symlink (see `at.rs`): even if the workspace changes
+/// while the commit runs, nothing is written outside it. Applying twice
+/// gives the same result, which is what lets a commit be resumed. `links`
+/// remembers files with several names in the branch (hard links), so they
+/// are linked in the workspace too instead of copied apart.
 fn apply(
     upper: &Path,
-    target: &Path,
+    dir: &OwnedFd,
     rel: &Path,
     skip: &HashSet<PathBuf>,
-    links: &mut HashMap<(u64, u64), PathBuf>,
+    links: &mut HashMap<(u64, u64), (OwnedFd, CString)>,
     access: &Access,
 ) -> io::Result<usize> {
+    let d = dir.as_raw_fd();
     let mut applied = 0;
     let mut entries: Vec<_> = fs::read_dir(upper)?.collect::<Result<_, _>>()?;
     entries.sort_by_key(|entry| entry.file_name());
+    // One commit at a time per workspace, so one temporary name per folder is enough.
+    let tmp = c".foil-commit.tmp";
     for entry in entries {
         let rel = rel.join(entry.file_name());
         if skip.contains(&rel) {
             continue;
         }
         let from = entry.path();
-        let to = target.join(entry.file_name());
+        let name = at::cname(&entry.file_name())?;
         let meta = entry.metadata()?;
         let kind = meta.file_type();
         let mode = access.mode(&from, &meta);
+        let existing = at::stat_at(d, &name)?;
         if is_whiteout(&meta) {
-            remove_any(&to)?;
+            at::remove_at(d, &name)?;
         } else if kind.is_dir() {
-            let opaque = is_opaque(&from);
-            if opaque || !to.symlink_metadata().is_ok_and(|m| m.is_dir()) {
-                remove_any(&to)?;
-                fs::create_dir(&to)?;
-            } else {
-                // A directory made read-only by an earlier, interrupted
-                // attempt must be writable again to be filled.
-                fs::set_permissions(&to, fs::Permissions::from_mode(0o700))?;
+            let keep = existing.is_some_and(|st| at::is_dir(&st)) && !is_opaque(&from);
+            if !keep {
+                at::remove_at(d, &name)?;
+                at::mkdir_at(d, &name)?;
             }
-            applied += apply(&from, &to, &rel, skip, links, access)?;
-            copy_xattrs(&from, &to)?;
-            // Only after filling it: the mode may make the directory read-only.
-            fs::set_permissions(&to, fs::Permissions::from_mode(mode))?;
+            let sub = at::open_dir_at(d, &name)?;
+            // A folder made read-only by an earlier, interrupted attempt
+            // must be writable again to be filled.
+            at::fchmod(sub.as_raw_fd(), 0o700)?;
+            applied += apply(&from, &sub, &rel, skip, links, access)?;
+            copy_xattrs_to(&from, sub.as_raw_fd())?;
+            // Only after filling it: the mode may make the folder read-only.
+            at::fchmod(sub.as_raw_fd(), mode)?;
         } else if kind.is_symlink() {
-            remove_any(&to)?;
-            symlink(fs::read_link(&from)?, &to)?;
+            at::remove_at(d, &name)?;
+            at::symlink_at(fs::read_link(&from)?.as_os_str(), d, &name)?;
         } else if kind.is_file() {
-            if to.symlink_metadata().is_ok_and(|m| m.is_dir()) {
-                remove_any(&to)?;
+            if existing.is_some_and(|st| at::is_dir(&st)) {
+                at::remove_at(d, &name)?;
             }
-            // Write next to the target, then rename over it: readers see the
-            // old file or the new one, never half of each. One commit at a
-            // time per workspace, so one temporary name per folder is enough.
-            let tmp = target.join(".foil-commit.tmp");
-            // A leftover from an interrupted attempt may be read-only.
-            let _ = fs::remove_file(&tmp);
-            let first_name = (meta.nlink() > 1).then(|| links.get(&(meta.dev(), meta.ino())).cloned()).flatten();
+            // Written next to the target, then renamed over it: readers see
+            // the old file or the new one, never half of each.
+            at::remove_at(d, tmp)?;
+            let first_name = (meta.nlink() > 1).then(|| links.get(&(meta.dev(), meta.ino()))).flatten();
             match first_name {
-                Some(first) => {
-                    fs::hard_link(&first, &tmp)?;
-                }
+                Some((first_dir, first)) => at::link_at(first_dir.as_raw_fd(), first, d, tmp)?,
                 None => {
-                    fs::copy(&from, &tmp)?;
+                    let mut out = at::create_at(d, tmp)?;
+                    io::copy(&mut File::open(&from)?, &mut out)?;
                     // Before the mode: setting a user xattr needs write permission.
-                    copy_xattrs(&from, &tmp)?;
-                    fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
+                    copy_xattrs_to(&from, out.as_raw_fd())?;
+                    at::fchmod(out.as_raw_fd(), mode)?;
                     if meta.nlink() > 1 {
-                        links.insert((meta.dev(), meta.ino()), to.clone());
+                        links.insert((meta.dev(), meta.ino()), (dir.try_clone()?, name.clone()));
                     }
                 }
             }
-            fs::rename(&tmp, &to)?;
+            at::rename_at(d, tmp, &name)?;
         } else if kind.is_fifo() {
-            remove_any(&to)?;
-            let path = c_path(&to)?;
-            // SAFETY: valid NUL-terminated path.
-            if unsafe { libc::mkfifo(path.as_ptr(), mode as libc::mode_t) } == -1 {
-                return Err(io::Error::last_os_error());
-            }
-            fs::set_permissions(&to, fs::Permissions::from_mode(mode))?;
+            at::remove_at(d, &name)?;
+            at::mkfifo_at(d, &name, mode)?;
         } else {
             unreachable!("check_committable refuses other file types");
         }
         applied += 1;
-        crash_point();
+        crash_point()?;
     }
     Ok(applied)
+}
+
+/// Copy `from`'s extended attributes (overlayfs's own left out) onto the
+/// open file or folder `fd`.
+fn copy_xattrs_to(from: &Path, fd: RawFd) -> io::Result<()> {
+    for (name, value) in user_xattrs(from) {
+        let name = CString::new(name).expect("split at NUL");
+        if let Err(err) = at::fsetxattr(fd, &name, &value) {
+            // Some file systems don't take every namespace; not worth failing a commit.
+            if err.raw_os_error() != Some(libc::ENOTSUP) && err.raw_os_error() != Some(libc::EPERM) {
+                return Err(err);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// While it lives, every folder in a branch's upper layer can be listed and
@@ -809,38 +824,6 @@ fn user_xattrs(path: &Path) -> Vec<(Vec<u8>, Vec<u8>)> {
     out
 }
 
-/// Copy extended attributes, except overlayfs's own bookkeeping.
-fn copy_xattrs(from: &Path, to: &Path) -> io::Result<()> {
-    let (src, dst) = (c_path(from)?, c_path(to)?);
-    let mut names = vec![0u8; 4096];
-    // SAFETY: valid path; the buffer's length is passed.
-    let n = unsafe { libc::llistxattr(src.as_ptr(), names.as_mut_ptr().cast(), names.len()) };
-    if n <= 0 {
-        return Ok(()); // none, or not supported here
-    }
-    for name in names[..n as usize].split(|&b| b == 0).filter(|n| !n.is_empty()) {
-        if name.starts_with(b"user.overlay.") || name.starts_with(b"trusted.overlay.") {
-            continue;
-        }
-        let cname = std::ffi::CString::new(name).expect("split at NUL");
-        let mut value = vec![0u8; 65536];
-        // SAFETY: valid path and name; the buffer's length is passed.
-        let len = unsafe { libc::lgetxattr(src.as_ptr(), cname.as_ptr(), value.as_mut_ptr().cast(), value.len()) };
-        if len < 0 {
-            continue;
-        }
-        // SAFETY: valid path and name; `len` bytes of `value` are initialized.
-        if unsafe { libc::lsetxattr(dst.as_ptr(), cname.as_ptr(), value.as_ptr().cast(), len as usize, 0) } == -1 {
-            let err = io::Error::last_os_error();
-            // Some file systems don't take every namespace; not worth failing a commit.
-            if err.raw_os_error() != Some(libc::ENOTSUP) && err.raw_os_error() != Some(libc::EPERM) {
-                return Err(err);
-            }
-        }
-    }
-    Ok(())
-}
-
 /// The journal: a version line, then the paths the commit leaves out.
 fn journal_bytes(skip: &HashSet<PathBuf>) -> Vec<u8> {
     let mut paths: Vec<&PathBuf> = skip.iter().collect();
@@ -887,20 +870,40 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 }
 
 /// Test builds only: `FOIL_TEST_CRASH_AFTER=N` kills foil (SIGKILL, like a
-/// crash) right after the Nth change a commit applies.
-fn crash_point() {
+/// crash) right after the Nth change a commit applies; `FOIL_TEST_FAIL_AFTER=N`
+/// makes the Nth change fail with an I/O error (EIO), like a failing disk.
+fn crash_point() -> io::Result<()> {
     #[cfg(debug_assertions)]
     {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static DONE: AtomicUsize = AtomicUsize::new(0);
+        let done = DONE.fetch_add(1, Ordering::SeqCst) + 1;
+        // FOIL_TEST_PAUSE_AFTER=N with FOIL_TEST_PAUSE_FILE: after the Nth
+        // change, wait until that file exists (lets a test act mid-commit).
+        let pause = std::env::var("FOIL_TEST_PAUSE_AFTER").ok().and_then(|v| v.parse::<usize>().ok());
+        if let (Some(n), Some(file)) = (pause, std::env::var_os("FOIL_TEST_PAUSE_FILE")) {
+            if done == n {
+                let _ = std::fs::write(Path::new(&file).with_extension("reached"), b"");
+                for _ in 0..3000 {
+                    if Path::new(&file).exists() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        }
+        if std::env::var("FOIL_TEST_FAIL_AFTER").ok().and_then(|v| v.parse::<usize>().ok()) == Some(done) {
+            return Err(io::Error::from_raw_os_error(libc::EIO));
+        }
         let Some(limit) = std::env::var("FOIL_TEST_CRASH_AFTER").ok().and_then(|v| v.parse::<usize>().ok()) else {
-            return;
+            return Ok(());
         };
-        if DONE.fetch_add(1, Ordering::SeqCst) + 1 >= limit {
+        if done >= limit {
             // SAFETY: sends a signal to ourselves.
             unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
         }
     }
+    Ok(())
 }
 
 /// Overlayfs records a deleted file as a character device with number 0:0.
@@ -923,19 +926,6 @@ fn is_opaque(dir: &Path) -> bool {
         )
     };
     n == 1 && value[0] == b'y'
-}
-
-/// Remove a file, symlink or directory tree; a missing path is fine.
-fn remove_any(path: &Path) -> io::Result<()> {
-    let result = match path.symlink_metadata() {
-        Ok(meta) if meta.is_dir() => fs::remove_dir_all(path),
-        Ok(_) => fs::remove_file(path),
-        Err(err) => Err(err),
-    };
-    match result {
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-        other => other,
-    }
 }
 
 /// `remove_dir_all` that also copes with directories we own but may not

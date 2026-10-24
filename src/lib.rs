@@ -4,6 +4,7 @@
 compile_error!("foil requires Linux (pidfd, signalfd, namespaces)");
 
 pub mod agent;
+pub mod at;
 pub mod branch;
 pub mod cgroup;
 pub mod container;

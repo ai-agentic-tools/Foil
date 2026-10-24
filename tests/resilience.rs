@@ -114,23 +114,22 @@ fn a_failed_write_keeps_the_branch_and_a_retry_finishes() {
     if !branches_available() {
         return;
     }
-    let env = Env::new("eacces");
+    let env = Env::new("eio");
     assert!(Env::sh(&env.ws(), "mkdir sub && echo old > sub/f && echo a > a").status.success());
     assert!(env.run("t", "echo new > sub/f && echo b > a && echo z > z").status.success());
-    // Something outside foil's control blocks a write: a file where the
-    // commit's temporary file must go, that can't be removed.
-    assert!(Env::sh(&env.ws(), "mkdir sub/.foil-commit.tmp && touch sub/.foil-commit.tmp/x && chmod 500 sub/.foil-commit.tmp").status.success());
-    let out = env.foil(&["commit", "t"]).output().unwrap();
+    // The disk fails on the second change (debug builds: FOIL_TEST_FAIL_AFTER).
+    let out = env.foil(&["commit", "t"]).env("FOIL_TEST_FAIL_AFTER", "2").output().unwrap();
     assert!(!out.status.success());
-    assert!(text(&out.stderr).contains("stopped half-way"), "{}", text(&out.stderr));
+    let stderr = text(&out.stderr);
+    assert!(stderr.contains("stopped half-way") && stderr.contains("Input/output error"), "{stderr}");
     assert_eq!(text(&env.foil(&["list"]).output().unwrap().stdout).lines().count(), 1, "branch must be kept");
 
-    assert!(Env::sh(&env.ws(), "chmod 700 sub/.foil-commit.tmp && rm -r sub/.foil-commit.tmp").status.success());
     let out = env.foil(&["commit", "t"]).output().unwrap();
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert_eq!(std::fs::read_to_string(env.ws().join("sub/f")).unwrap(), "new\n");
     assert_eq!(std::fs::read_to_string(env.ws().join("a")).unwrap(), "b\n");
     assert_eq!(std::fs::read_to_string(env.ws().join("z")).unwrap(), "z\n");
+    assert_no_leftovers(&env.ws());
 }
 
 #[test]
@@ -368,4 +367,44 @@ fn hard_links_keep_their_mode_through_commit() {
     assert!(out.status.success(), "{}", text(&out.stderr));
     let (got, want) = (snapshot(&env.ws()), snapshot(&reference));
     assert!(got == want, "{}", differences(&got, &want).join("\n"));
+}
+
+/// A folder swapped for a symlink in the middle of a commit must not send
+/// the commit's remaining writes outside the workspace (the commit works
+/// from open folders and never follows symlinks; debug builds can pause a
+/// commit with FOIL_TEST_PAUSE_AFTER / FOIL_TEST_PAUSE_FILE).
+#[test]
+fn a_folder_swapped_for_a_symlink_mid_commit_cannot_redirect_writes() {
+    if !branches_available() {
+        return;
+    }
+    let env = Env::new("swap");
+    let outside = env.root.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    assert!(Env::sh(&env.ws(), "mkdir d && echo keep > d/keep").status.success());
+    assert!(env.run("t", "echo 1 > d/x1 && echo 2 > d/x2 && echo 3 > d/x3").status.success());
+
+    let go = env.root.join("go");
+    let reached = go.with_extension("reached");
+    let mut commit = env
+        .foil(&["commit", "t"])
+        .env("FOIL_TEST_PAUSE_AFTER", "1")
+        .env("FOIL_TEST_PAUSE_FILE", &go)
+        .spawn()
+        .unwrap();
+    while !reached.exists() {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    // Mid-commit: the real folder moves away and a symlink to `outside` takes its place.
+    std::fs::rename(env.ws().join("d"), env.ws().join("d.moved")).unwrap();
+    std::os::unix::fs::symlink(&outside, env.ws().join("d")).unwrap();
+    std::fs::write(&go, b"").unwrap();
+    let _ = commit.wait();
+
+    let leaked: Vec<_> = std::fs::read_dir(&outside).unwrap().flatten().map(|e| e.file_name()).collect();
+    assert!(leaked.is_empty(), "the commit wrote outside the workspace: {leaked:?}");
+    // It went on writing into the real folder it had open, wherever that moved.
+    for f in ["x2", "x3"] {
+        assert!(env.ws().join("d.moved").join(f).exists(), "{f} was not written");
+    }
 }

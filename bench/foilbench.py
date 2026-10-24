@@ -13,6 +13,7 @@ Measures, with the binary given by $FOIL (default: foil on PATH):
   branch_start_100k   branch_start in a workspace of 100 000 files (must stay flat)
   copy_up_100mb       append 1 byte to a 100 MB file inside a branch (overlay copies it up)
   concurrent_N        N branch starts at once (N = 10, 50): p50/p99 of each one's latency
+  session_burst_50_total  50 branch starts at once inside one `foil session`: total time
 
 Usage:
   foilbench.py [--quick] [--out results.json]
@@ -117,6 +118,16 @@ class Bench:
         for _ in range(max(3, self.n // 10)):
             samples.append(timed([FOIL, "run", "-b", self.fresh(), "--", "sh", "-c", "printf x >> big"], ws, self.env))
         r["copy_up_100mb"] = summary(samples)
+
+        # The same 50 at once inside one `foil session`: total wall time.
+        script = f"for i in $(seq 50); do {FOIL} run -b s$i -- true & done; wait"
+        samples = []
+        for _ in range(3):
+            sub = os.path.join(self.root, f"session{self.counter}")
+            self.counter += 1
+            os.makedirs(sub)
+            samples.append(timed([FOIL, "session", "--", "sh", "-c", script], sub, self.env))
+        r["session_burst_50_total"] = summary(samples)
 
         for n in (10, 50):
             with concurrent.futures.ThreadPoolExecutor(n) as pool:

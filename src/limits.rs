@@ -132,6 +132,31 @@ pub fn on_path(program: &str) -> bool {
 
 /// Fail early, with a clear message, when there is no systemd user manager
 /// to talk to (systemd-run itself would print a terse D-Bus error).
+/// Run `command` in one systemd user scope that foil may manage
+/// (`Delegate=yes`), so every `foil run` inside it makes its cleanup box
+/// there directly, instead of asking systemd for a scope of its own. systemd
+/// creates scopes one at a time: 50 runs started at once took about a
+/// second each that way, against milliseconds inside one shared scope.
+/// Where foil can already make boxes, or systemd is not available, the
+/// command runs as it is. Only returns on failure.
+pub fn session(command: &[OsString]) -> io::Error {
+    let Some((program, args)) = command.split_first() else {
+        return io::Error::new(io::ErrorKind::InvalidInput, "foil session: no command");
+    };
+    let direct = std::env::var_os("FOIL_NO_SCOPE").is_some()
+        || crate::cgroup::can_box()
+        || user_session().is_err()
+        || !on_path("systemd-run");
+    if direct {
+        return Command::new(program).args(args).exec();
+    }
+    Command::new("systemd-run")
+        .args(["--user", "--scope", "--quiet", "--collect", "-p", "Delegate=yes", "--"])
+        .arg(program)
+        .args(args)
+        .exec()
+}
+
 fn user_session() -> io::Result<()> {
     let bus = std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
         || std::env::var_os("XDG_RUNTIME_DIR").is_some_and(|dir| Path::new(&dir).join("bus").exists());

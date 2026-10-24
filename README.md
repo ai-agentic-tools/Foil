@@ -58,7 +58,17 @@ grow with the workspace: nothing is copied until it is written.*
   `--patch` shows a unified diff, `--json` feeds your tooling.
   `foil commit` applies the branch. It **refuses** if any file it changes was
   also changed in the real folder since the branch was made (say, by
-  another agent's commit), naming each one; `--force` overrides.
+  another agent's commit), naming each one; `--force` overrides. Commits
+  into one folder take turns, so two agents can never both win.
+- **Crash-safe commit.** A commit records what it will do before it starts
+  and syncs to disk before it deletes the branch. If foil is killed, the
+  machine loses power or the disk fills half-way, run `foil commit NAME`
+  again and it finishes the same commit. (`foil abort` then refuses, since
+  the folder already has part of the change; `abort --force` keeps it as it
+  is.)
+- **Many attempts at once.** `foil fanout -n 3 --check "make test" -- ...`
+  runs three attempts in parallel branches, checks each, and `foil pick`
+  commits the best.
 - **`--protect`**: the whole filesystem is read-only to the command except
   the branch, `/tmp`, `/var/tmp`, `/dev/shm` and any `--allow-write PATH`.
   An agent cannot touch `~/.ssh`, your dotfiles, other repos, or the
@@ -145,6 +155,17 @@ foil run -b pr-1234 --protect --no-network --memory 2G --pids 256 -- make test
 foil abort pr-1234
 ```
 
+**An orchestrator that starts many runs at once**
+
+```sh
+foil session -- ./my-agent-harness      # every foil run inside starts fast
+```
+
+Without a cgroup it may manage, each run asks systemd for one, and systemd
+handles those requests one at a time (50 runs at once: ~1.5 s each).
+Inside one `foil session` they don't need to (50 runs: ~65 ms in total).
+`foil fanout` does this by itself.
+
 **In CI or scripts**
 
 ```sh
@@ -174,8 +195,11 @@ foil run [options] [--] <command> [args...]
   --pids N              process and thread limit
 foil agent NAME [run options] [-- agent args]    NAME: claude, codex
 foil diff [--patch | --json] [--all] NAME
+foil fanout -n N [--check CMD] [--agent NAME] [--name BASE] [--pick] [run options] [--] ...
+foil pick NAME
+foil session [--] <command> [args...]
 foil commit [--force] [--all] NAME
-foil abort NAME
+foil abort [--force] NAME
 foil list [--json]
 foil doctor
 foil setup [--print]
@@ -200,10 +224,17 @@ foil is a guard rail, not a security boundary against a determined attacker.
   it does not protect against kernel exploits. Use a VM for hostile code.
 - **`/tmp` is shared** with the rest of the machine under `--protect` (it is
   private under `--strict`).
-- **Commit is per file atomic, not all at once.** If a commit fails half-way
-  (disk full), the branch is kept so you can retry.
+- **Commit is per file atomic, not all at once.** Readers of the folder can
+  see a commit half-done while it runs; if it stops half-way, `foil commit`
+  finishes it.
 - **Conflicts are detected per path, not merged.** A conflicting commit is
-  refused; you choose to force it or abort.
+  refused; you choose to force it or abort. Detection uses change times: a
+  change made in the same instant just before the branch can be flagged
+  (the safe mistake); one made after is never missed.
+- **Renaming a folder inside a branch is a copy.** overlayfs answers a folder
+  rename with "cross-device", so tools like `mv` copy and delete instead:
+  slower for big folders, and it fails half-way on a folder whose owner
+  removed their own search (`x`) permission. Files rename normally.
 
 ## How it works
 

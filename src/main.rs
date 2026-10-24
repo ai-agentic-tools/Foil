@@ -39,6 +39,11 @@ usage: foil run [options] [--] <command> [args...]
                                its branch (exit 0 = pass); the best is the passing
                                attempt with the fewest changes; --pick commits it
        foil pick NAME          commit fanout attempt NAME, discard its siblings
+       foil session [--] <command> [args...]
+                               run command (an agent harness, a script that starts
+                               many foil runs at once) in one systemd scope foil may
+                               manage, so runs inside it start without waiting for
+                               systemd one at a time
        foil diff [--patch | --json] [--all] NAME
                                what branch NAME changed (A added, M modified,
                                D deleted, R replaced), or the full patch;
@@ -66,6 +71,15 @@ fn main() {
         Some("run") => run(rest),
         Some("agent") => agent(rest),
         Some("fanout") => fanout(rest),
+        Some("session") => {
+            let command = rest.strip_prefix(&[OsString::from("--")][..]).unwrap_or(&rest);
+            if command.is_empty() {
+                usage();
+            }
+            let err = foil::limits::session(command);
+            eprintln!("foil: {}: {err}", command[0].to_string_lossy());
+            exit(if err.kind() == ErrorKind::NotFound { 127 } else { 126 })
+        }
         Some("pick") => {
             let (_, name) = flags_and_name(rest, &[]);
             finish(foil::fanout::pick(&name).map(|(n, gone)| {
@@ -347,6 +361,16 @@ fn agent(args: Vec<OsString>) {
 /// `foil fanout -n N [--check CMD] [--agent NAME] [--name BASE] [--pick] [run options] [--] ...`.
 fn fanout(args: Vec<OsString>) {
     use foil::fanout::{self, Plan};
+    // All attempts start at once: give them one shared scope (see `foil
+    // session`), so they don't each wait for systemd to make their own.
+    if std::env::var_os("FOIL_FANOUT_SESSION").is_none() && !foil::cgroup::can_box() {
+        std::env::set_var("FOIL_FANOUT_SESSION", "1");
+        let me = std::env::current_exe().map(OsString::from).unwrap_or_else(|_| "foil".into());
+        let command: Vec<OsString> = [me, "fanout".into()].into_iter().chain(args.iter().cloned()).collect();
+        let err = foil::limits::session(&command);
+        eprintln!("foil: fanout: {err}");
+        exit(125)
+    }
     let mut args = args.into_iter().peekable();
     let (mut attempts, mut check, mut agent, mut base, mut pick) = (None, None, None, None, false);
     // Fanout's own flags may come anywhere among the `foil run` options;

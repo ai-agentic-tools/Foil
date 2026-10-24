@@ -87,3 +87,31 @@ fn bad_limit_values_are_rejected() {
         assert_eq!(out.status.code(), Some(2), "{flag} {value} was accepted");
     }
 }
+
+/// `foil session`: runs inside it make their cleanup box in the session's
+/// scope directly (no scope of their own), and the box really holds them.
+#[test]
+fn runs_inside_a_session_get_their_box_without_a_scope_each() {
+    if !available() {
+        return;
+    }
+    let ws = std::env::temp_dir().join(format!("foil-session-{}", std::process::id()));
+    std::fs::create_dir_all(&ws).unwrap();
+    let foil = env!("CARGO_BIN_EXE_foil");
+    let script = format!(
+        "{foil} run -b s1 -- cat /proc/self/cgroup; echo; FOIL_NO_SCOPE=1 {foil} run -b s2 -- cat /proc/self/cgroup"
+    );
+    let out = Command::new(foil)
+        .args(["session", "--", "sh", "-c", &script])
+        .current_dir(&ws)
+        .env("FOIL_HOME", std::env::temp_dir().join(format!("foil-session-home-{}", std::process::id())))
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&ws);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    // Both runs sit in a foil box; the second could not have asked systemd
+    // (FOIL_NO_SCOPE), so its box came from the session.
+    assert_eq!(stdout.matches("/foil-").count(), 2, "{stdout}");
+    assert!(!stdout.contains("FOIL_SCOPED"));
+}

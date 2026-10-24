@@ -71,7 +71,12 @@ fn operation(rng: &mut Rng) -> String {
         8 => format!("mv {p} {q}"),
         9 => format!("rm -rf {p} && ln -s {q} {p}"),
         10 => format!("ln {p} {q}"),
-        11 => format!("chmod {} {p}", rng.pick(&["644", "755", "600", "444", "700", "555"])),
+        // Folders keep their owner's x: inside a branch, overlayfs turns a
+        // folder rename into copy-and-delete (EXDEV), which fails half-way
+        // on a folder its owner can't search, unlike a real rename. That is
+        // a documented overlayfs limitation; unsearchable folders have their
+        // own test in resilience.rs.
+        11 => format!("chmod {m} {p} && {{ [ ! -d {p} ] || chmod u+x {p}; }}", m = rng.pick(&["644", "755", "600", "444", "700", "555"])),
         12 => format!("mkfifo {p}"),
         13 => format!("python3 -c \"import os,sys; os.setxattr(sys.argv[1], 'user.k', b'{n}')\" {p}"),
         14 => format!("rm -rf {p} && mkdir -p {p} && printf 'in{n}' > {p}/inner"),
@@ -190,7 +195,13 @@ fn run_case(seed: u64) -> Result<(), String> {
         let only_a_folder_mode = matches!(want.get(&path), Some(common::Node::Dir { .. }))
             && matches!(before.get(&path), Some(common::Node::Dir { .. }));
         if !covered && !only_a_folder_mode {
-            return Err(report(format!("foil diff does not show {}:\n{}", path.display(), text(&out.stdout))));
+            return Err(report(format!(
+                "foil diff does not show {}:\n  before: {:?}\n  after:  {:?}\n{}",
+                path.display(),
+                before.get(&path),
+                want.get(&path),
+                text(&out.stdout)
+            )));
         }
     }
 

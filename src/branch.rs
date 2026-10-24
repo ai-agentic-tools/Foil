@@ -321,7 +321,14 @@ impl Branch {
                 match (existed, is_opaque(&upper)) {
                     (false, _) => Some(ChangeKind::Added),
                     (true, true) => Some(ChangeKind::Replaced),
-                    (true, false) => None,
+                    // Unless its own mode or extended attributes changed:
+                    // commit applies those, so diff must show them.
+                    (true, false) => {
+                        let old = before.as_ref().expect("existed");
+                        let mode_changed = real_mode(&meta) != old.mode() & 0o7777;
+                        let xattrs_changed = user_xattrs(&upper) != user_xattrs(&self.workspace.join(&rel));
+                        (mode_changed || xattrs_changed).then_some(ChangeKind::Modified)
+                    }
                 }
             } else if existed {
                 Some(ChangeKind::Modified)
@@ -344,10 +351,9 @@ impl Branch {
     ///
     /// "At or after" the branch's creation, not strictly after: the kernel
     /// stamps most changes with a coarse clock that only advances every
-    /// tick (a few milliseconds), so a change made right after the branch
-    /// can carry the very same time. Counting equal times as conflicts can
-    /// flag a change made in the same tick just before the branch, which is
-    /// the safe mistake; the other one silently overwrites someone's work.
+    /// tick, so a change made right after the branch can carry the very
+    /// same time. The branch's own time is an exact one (see
+    /// `build_branch`), so changes made before it are older.
     pub fn conflicts(&self, all: bool) -> io::Result<Vec<PathBuf>> {
         let created = self.created()?;
         let mut conflicts = Vec::new();
@@ -520,7 +526,17 @@ fn build_branch(dir: &Path, workspace: &Path) -> io::Result<()> {
     fs::create_dir(dir)?;
     fs::create_dir(dir.join("upper"))?;
     fs::create_dir(dir.join("work"))?;
-    fs::write(dir.join("workspace"), workspace.as_os_str().as_bytes())
+    let marker = dir.join("workspace");
+    fs::write(&marker, workspace.as_os_str().as_bytes())?;
+    // The branch's time (see `conflicts`). A new file gets a coarse stamp,
+    // which can lag far behind real time on tickless kernels, so changes
+    // made before the branch could look newer. Looking at the file and then
+    // writing it again gets an exact stamp instead (multigrain timestamps,
+    // Linux 6.13+): every earlier change is older, and every later stamp,
+    // coarse or exact, is at least as new. Older kernels stamp everything
+    // coarsely, and the comparison stays correct there too.
+    fs::symlink_metadata(&marker)?;
+    fs::write(&marker, workspace.as_os_str().as_bytes())
 }
 
 /// `path` made absolute with symlinks and `..` resolved, even when its last
@@ -646,6 +662,24 @@ struct Access {
 /// Whether an `Access` is open in this process.
 static ACCESS_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// The real permission bits of files and folders an `Access` opened, by
+/// device and inode: one file may have several names (hard links), and a
+/// `diff` inside a `commit` must see what the commit's `Access` opened.
+static REAL_MODES: std::sync::Mutex<Option<HashMap<(u64, u64), u32>>> = std::sync::Mutex::new(None);
+
+/// The real permission bits of the upper-layer entry with metadata `meta`.
+fn real_mode(meta: &fs::Metadata) -> u32 {
+    let modes = REAL_MODES.lock().unwrap_or_else(|e| e.into_inner());
+    modes.as_ref().and_then(|m| m.get(&(meta.dev(), meta.ino())).copied()).unwrap_or(meta.mode() & 0o7777)
+}
+
+fn remember_mode(path: &Path, mode: u32) {
+    if let Ok(meta) = path.symlink_metadata() {
+        let mut modes = REAL_MODES.lock().unwrap_or_else(|e| e.into_inner());
+        modes.get_or_insert_with(HashMap::new).entry((meta.dev(), meta.ino())).or_insert(mode);
+    }
+}
+
 impl Access {
     fn open(upper: &Path, record: &Path) -> io::Result<Access> {
         let mut access = Access { record: record.to_owned(), real: Vec::new(), outer: false };
@@ -661,7 +695,9 @@ impl Access {
                 let (mode, path) = item.split_at(item.iter().position(|&b| b == b' ').unwrap_or(0));
                 let mode = std::str::from_utf8(mode).ok().and_then(|m| u32::from_str_radix(m, 8).ok());
                 if let (Some(mode), Some(path)) = (mode, path.get(1..)) {
-                    access.real.push((PathBuf::from(OsStr::from_bytes(path)), mode));
+                    let path = PathBuf::from(OsStr::from_bytes(path));
+                    remember_mode(&path, mode);
+                    access.real.push((path, mode));
                 }
             }
         }
@@ -679,6 +715,7 @@ impl Access {
             if mode & need != need && !self.real.iter().any(|(p, _)| *p == path) {
                 self.real.push((path.clone(), mode));
                 self.save()?;
+                remember_mode(&path, mode);
                 fs::set_permissions(&path, fs::Permissions::from_mode(mode | need))?;
             }
             if meta.is_dir() {
@@ -700,7 +737,9 @@ impl Access {
 
     /// The real permission bits of `path`, whose current metadata is `meta`.
     fn mode(&self, path: &Path, meta: &fs::Metadata) -> u32 {
-        self.real.iter().find(|(p, _)| p == path).map_or(meta.mode() & 0o7777, |(_, m)| *m)
+        // By path first (the record), then by file: another name of a file
+        // this Access opened has the same inode and the same real mode.
+        self.real.iter().find(|(p, _)| p == path).map_or_else(|| real_mode(meta), |(_, m)| *m)
     }
 }
 
@@ -710,6 +749,7 @@ impl Drop for Access {
             return;
         }
         ACCESS_OPEN.store(false, std::sync::atomic::Ordering::SeqCst);
+        *REAL_MODES.lock().unwrap_or_else(|e| e.into_inner()) = None;
         if self.real.is_empty() {
             return;
         }
@@ -740,6 +780,33 @@ fn check_committable(dir: &Path) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// A path's extended attributes, overlayfs's own bookkeeping left out,
+/// sorted: what a commit copies, for comparing two paths.
+fn user_xattrs(path: &Path) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let Ok(c) = c_path(path) else { return Vec::new() };
+    let mut names = vec![0u8; 4096];
+    // SAFETY: valid path; the buffer's length is passed.
+    let n = unsafe { libc::llistxattr(c.as_ptr(), names.as_mut_ptr().cast(), names.len()) };
+    if n <= 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for name in names[..n as usize].split(|&b| b == 0).filter(|n| !n.is_empty()) {
+        if name.starts_with(b"user.overlay.") || name.starts_with(b"trusted.overlay.") {
+            continue;
+        }
+        let cname = std::ffi::CString::new(name).expect("split at NUL");
+        let mut value = vec![0u8; 65536];
+        // SAFETY: valid path and name; the buffer's length is passed.
+        let len = unsafe { libc::lgetxattr(c.as_ptr(), cname.as_ptr(), value.as_mut_ptr().cast(), value.len()) };
+        if len >= 0 {
+            out.push((name.to_vec(), value[..len as usize].to_vec()));
+        }
+    }
+    out.sort();
+    out
 }
 
 /// Copy extended attributes, except overlayfs's own bookkeeping.

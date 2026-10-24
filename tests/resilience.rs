@@ -333,3 +333,39 @@ fn a_change_right_after_the_branch_is_made_is_still_a_conflict() {
     }
     assert!(missed.is_empty(), "the outside change was overwritten without a conflict in rounds {missed:?}");
 }
+
+/// Found by the differential test: a folder whose only change was its own
+/// extended attribute was committed but not shown by `foil diff`.
+#[test]
+fn a_folder_metadata_change_is_shown_by_diff() {
+    if !branches_available() {
+        return;
+    }
+    let env = Env::new("dir-meta");
+    assert!(Env::sh(&env.ws(), "mkdir d && echo x > d/f && mkdir m").status.success());
+    let edits = "python3 -c \"import os; os.setxattr('d', 'user.k', b'v')\" && chmod 700 m";
+    assert!(env.run("t", edits).status.success());
+    let listed = text(&env.foil(&["diff", "t"]).output().unwrap().stdout);
+    assert!(listed.lines().any(|l| l == "M d"), "{listed}");
+    assert!(listed.lines().any(|l| l == "M m"), "{listed}");
+}
+
+/// Found by the differential test: two names of one read-only file came out
+/// writable after commit (the real mode was remembered per name).
+#[test]
+fn hard_links_keep_their_mode_through_commit() {
+    if !branches_available() {
+        return;
+    }
+    let env = Env::new("link-mode");
+    assert!(Env::sh(&env.ws(), "mkdir sub").status.success());
+    let edits = "echo v > b && ln b sub/b && chmod 444 b";
+    assert!(env.run("t", edits).status.success());
+    let reference = env.root.join("reference");
+    copy_tree(&env.ws(), &reference);
+    assert!(Env::sh(&reference, edits).status.success());
+    let out = env.foil(&["commit", "t"]).output().unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let (got, want) = (snapshot(&env.ws()), snapshot(&reference));
+    assert!(got == want, "{}", differences(&got, &want).join("\n"));
+}

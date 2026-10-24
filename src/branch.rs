@@ -294,10 +294,39 @@ impl Branch {
 
     /// Every change this branch would make to its workspace, in path order.
     pub fn diff(&self) -> io::Result<Vec<Change>> {
-        let _access = Access::open(&self.upper(), &self.dir.join("modes"))?;
+        let (_lock, _access) = self.open_for_reading()?;
         let mut changes = Vec::new();
-        self.collect_changes(Path::new(""), &mut changes)?;
+        self.collect_changes(Path::new(""), &mut changes).map_err(|err| self.explain(err))?;
         Ok(changes)
+    }
+
+    /// Get read access to the whole upper layer for a diff or patch. Folders
+    /// the command made unreadable are opened (see `Access`) only while no
+    /// run uses the branch, so a running command never sees its files
+    /// change mode under it. Inside a commit, which already holds the lock
+    /// and its own `Access`, there is nothing to do.
+    fn open_for_reading(&self) -> io::Result<(Option<File>, Access)> {
+        if ACCESS_OPEN.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok((None, Access::open(&self.upper(), &self.dir.join("modes"), false)?));
+        }
+        let lock = self.lock().ok();
+        let may_open = lock.is_some();
+        Ok((lock, Access::open(&self.upper(), &self.dir.join("modes"), may_open)?))
+    }
+
+    /// A clearer error for a folder we could not read in a branch in use.
+    fn explain(&self, err: io::Error) -> io::Error {
+        if err.kind() != io::ErrorKind::PermissionDenied {
+            return err;
+        }
+        io::Error::new(
+            err.kind(),
+            format!(
+                "branch {} is in use, and its command made a folder unreadable; \
+                 run foil diff again when the run has ended",
+                self.name
+            ),
+        )
     }
 
     fn collect_changes(&self, rel: &Path, out: &mut Vec<Change>) -> io::Result<()> {
@@ -391,7 +420,7 @@ impl Branch {
         let journal = self.dir.join("committing");
         // The command may have left folders we can't list or files we can't
         // read in the branch; open them while we work, with the real modes kept.
-        let access = Access::open(&self.upper(), &self.dir.join("modes"))?;
+        let access = Access::open(&self.upper(), &self.dir.join("modes"), true)?;
         let skip = match fs::read(&journal) {
             // An interrupted commit: finish it as it was decided.
             Ok(raw) => read_journal(&raw)?,
@@ -466,7 +495,7 @@ impl Branch {
     /// text for regular files, a one-line note for everything else.
     pub fn write_patch(&self, out: &mut impl Write, all: bool) -> io::Result<()> {
         let changes = self.changes(all)?.0;
-        let _access = Access::open(&self.upper(), &self.dir.join("modes"))?;
+        let (_lock, _access) = self.open_for_reading()?;
         for change in changes {
             let old = self.workspace.join(&change.path);
             let new = self.upper().join(&change.path);
@@ -534,11 +563,27 @@ fn build_branch(dir: &Path, workspace: &Path) -> io::Result<()> {
     // which can lag far behind real time on tickless kernels, so changes
     // made before the branch could look newer. Looking at the file and then
     // writing it again gets an exact stamp instead (multigrain timestamps,
-    // Linux 6.13+): every earlier change is older, and every later stamp,
-    // coarse or exact, is at least as new. Older kernels stamp everything
-    // coarsely, and the comparison stays correct there too.
+    // Linux 6.13+), so every earlier change is older. Older kernels stamp
+    // everything coarsely, and the comparison stays correct there too.
     fs::symlink_metadata(&marker)?;
-    fs::write(&marker, workspace.as_os_str().as_bytes())
+    fs::write(&marker, workspace.as_os_str().as_bytes())?;
+    // Later changes may still get coarse stamps, and the coarse clock may
+    // trail that exact one. Wait until it has caught up: a fresh file (never
+    // looked at, so stamped coarsely) must be stamped at or after the
+    // branch's time. Then every later stamp, coarse or exact, is too.
+    // Usually immediate; at most a clock tick or so.
+    let created = fs::symlink_metadata(&marker)?.modified()?;
+    let probe = dir.join("clock");
+    for _ in 0..2000 {
+        fs::write(&probe, b"")?;
+        let stamp = fs::symlink_metadata(&probe)?.modified()?;
+        fs::remove_file(&probe)?;
+        if stamp >= created {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_micros(250));
+    }
+    Err(io::Error::other("the file system's clock did not advance in 0.5 s"))
 }
 
 /// `path` made absolute with symlinks and `..` resolved, even when its last
@@ -696,11 +741,12 @@ fn remember_mode(path: &Path, mode: u32) {
 }
 
 impl Access {
-    fn open(upper: &Path, record: &Path) -> io::Result<Access> {
+    /// With `may_open` false (the branch is in use), nothing is changed.
+    fn open(upper: &Path, record: &Path, may_open: bool) -> io::Result<Access> {
         let mut access = Access { record: record.to_owned(), real: Vec::new(), outer: false };
         // Within one that is already open (diff inside commit), do nothing:
         // the outer one restores everything when it is done.
-        if ACCESS_OPEN.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        if !may_open || ACCESS_OPEN.swap(true, std::sync::atomic::Ordering::SeqCst) {
             return Ok(access);
         }
         access.outer = true;

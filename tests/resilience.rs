@@ -408,3 +408,31 @@ fn a_folder_swapped_for_a_symlink_mid_commit_cannot_redirect_writes() {
         assert!(env.ws().join("d.moved").join(f).exists(), "{f} was not written");
     }
 }
+
+/// `foil diff` while a run still uses the branch must not change the modes
+/// of folders the running command closed; it explains instead, and works
+/// once the run has ended.
+#[test]
+fn diff_of_a_branch_in_use_leaves_closed_folders_alone() {
+    if !branches_available() {
+        return;
+    }
+    let env = Env::new("diff-busy");
+    let ready = env.root.join("ready");
+    let script = format!("mkdir closed && echo x > closed/f && chmod 000 closed && touch {} && sleep 2", ready.display());
+    let mut run = env.foil(&["run", "-b", "t", "--", "sh", "-c", &script]).spawn().unwrap();
+    while !ready.exists() {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let upper = env.root.join("home/branches/t/upper/closed");
+    let mode = |p: &std::path::Path| std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(p).unwrap().permissions()) & 0o7777;
+    let out = env.foil(&["diff", "t"]).output().unwrap();
+    assert!(!out.status.success(), "{}", text(&out.stdout));
+    assert!(text(&out.stderr).contains("is in use"), "{}", text(&out.stderr));
+    assert_eq!(mode(&upper), 0, "diff changed a folder the running command closed");
+    assert!(run.wait().unwrap().success());
+    let out = env.foil(&["diff", "t"]).output().unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains("closed/f"), "{}", text(&out.stdout));
+    assert_eq!(mode(&upper), 0, "diff left the folder open");
+}

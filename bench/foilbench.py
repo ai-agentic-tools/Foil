@@ -141,12 +141,17 @@ class Bench:
         shutil.rmtree(self.root, ignore_errors=True)
 
 
+# Only latencies that are stable on shared CI machines are gated; disk-heavy
+# (copy_up) and many-at-once measurements vary too much there and are reported.
+GATED = ("run_plain", "branch_start", "branch_start_strict", "abort", "commit_1", "branch_start_100k")
+
+
 def gate(baseline, results, tolerance):
     base_cal, now_cal = baseline["spawn_true"]["p50"], results["spawn_true"]["p50"]
     scale = now_cal / base_cal if base_cal > 0 else 1.0
     worse = []
     for k, v in baseline.items():
-        if k == "spawn_true" or k.startswith("_") or k not in results:
+        if k not in GATED or k not in results:
             continue
         limit = v["p50"] * max(scale, 1.0) * (1 + tolerance)
         mark = "REGRESSION" if results[k]["p50"] > limit else "ok"

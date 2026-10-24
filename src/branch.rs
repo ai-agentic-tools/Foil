@@ -559,31 +559,46 @@ fn build_branch(dir: &Path, workspace: &Path) -> io::Result<()> {
     fs::create_dir(dir.join("work"))?;
     let marker = dir.join("workspace");
     fs::write(&marker, workspace.as_os_str().as_bytes())?;
-    // The branch's time (see `conflicts`). A new file gets a coarse stamp,
-    // which can lag far behind real time on tickless kernels, so changes
-    // made before the branch could look newer. Looking at the file and then
-    // writing it again gets an exact stamp instead (multigrain timestamps,
-    // Linux 6.13+), so every earlier change is older. Older kernels stamp
-    // everything coarsely, and the comparison stays correct there too.
+    // The branch's time (see `conflicts`), with two clocks in play: most
+    // changes are stamped by a coarse clock that steps once per tick and can
+    // trail real time (by 100+ ms on tickless kernels), but since Linux 6.13
+    // a file looked at since its last change gets an exact stamp.
+    //
+    // A new file's coarse stamp is a safe branch time: coarse stamps only
+    // grow and exact ones are real time, so every later change is stamped
+    // at or after it. But a change made just *before* the branch may carry
+    // an exact stamp above it, a false conflict. So: look at the marker and
+    // write it again to give it an exact stamp, and wait (briefly) until the
+    // coarse clock has caught up with it; then earlier changes are older and
+    // later ones at or after it. If the coarse clock trails by more than
+    // 20 ms, keep the coarse stamp: never a missed conflict, at worst a
+    // false one.
+    let coarse = fs::symlink_metadata(&marker)?.modified()?;
     fs::symlink_metadata(&marker)?;
     fs::write(&marker, workspace.as_os_str().as_bytes())?;
-    // Later changes may still get coarse stamps, and the coarse clock may
-    // trail that exact one. Wait until it has caught up: a fresh file (never
-    // looked at, so stamped coarsely) must be stamped at or after the
-    // branch's time. Then every later stamp, coarse or exact, is too.
-    // Usually immediate; at most a clock tick or so.
-    let created = fs::symlink_metadata(&marker)?.modified()?;
-    let probe = dir.join("clock");
-    for _ in 0..2000 {
-        fs::write(&probe, b"")?;
-        let stamp = fs::symlink_metadata(&probe)?.modified()?;
-        fs::remove_file(&probe)?;
-        if stamp >= created {
-            return Ok(());
+    let exact = fs::symlink_metadata(&marker)?.modified()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(20);
+    while coarse_now() < exact {
+        if std::time::Instant::now() > deadline {
+            // Too far behind: fall back to the coarse time.
+            return set_mtime(&marker, coarse);
         }
-        std::thread::sleep(std::time::Duration::from_micros(250));
+        std::thread::sleep(std::time::Duration::from_micros(200));
     }
-    Err(io::Error::other("the file system's clock did not advance in 0.5 s"))
+    Ok(())
+}
+
+/// The kernel's coarse clock: the time file changes are usually stamped with.
+fn coarse_now() -> SystemTime {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: clock_gettime fills `ts`.
+    unsafe { libc::clock_gettime(libc::CLOCK_REALTIME_COARSE, &mut ts) };
+    SystemTime::UNIX_EPOCH + std::time::Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
+}
+
+/// Set a file's modification time (the branch time is read from it).
+fn set_mtime(path: &Path, time: SystemTime) -> io::Result<()> {
+    File::options().write(true).open(path)?.set_modified(time)
 }
 
 /// `path` made absolute with symlinks and `..` resolved, even when its last

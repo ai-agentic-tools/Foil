@@ -20,6 +20,9 @@ First public release.
   is itself started by `systemd-run --scope`.
 - `foil commit` counts changed paths, not folders overlayfs copied up to
   hold them ("applied 1 change", not "applied 66 changes").
+- On kernels before 6.13 a file changed in the same clock tick just before
+  a branch was made no longer shows as a false conflict: the branch starts
+  on a fresh tick (a few ms at branch creation).
 - `fanout` records each attempt's own run time; `--json` gives `status` as a
   number and `timed_out` separately.
 - Release binaries with SHA-256 checksums; `install.sh` can download one.

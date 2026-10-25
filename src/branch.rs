@@ -557,6 +557,15 @@ fn build_branch(dir: &Path, workspace: &Path) -> io::Result<()> {
     fs::create_dir(dir)?;
     fs::create_dir(dir.join("upper"))?;
     fs::create_dir(dir.join("work"))?;
+    // Before Linux 6.13 every change is stamped by the coarse clock, so a
+    // change made in the same tick just before the branch would carry the
+    // branch's own time and look like a conflict. Start on a fresh tick
+    // (at most one tick, a few ms; give up after 20 ms on a stalled clock).
+    let tick = coarse_now();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(20);
+    while coarse_now() <= tick && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_micros(200));
+    }
     let marker = dir.join("workspace");
     fs::write(&marker, workspace.as_os_str().as_bytes())?;
     // The branch's time (see `conflicts`), with two clocks in play: most

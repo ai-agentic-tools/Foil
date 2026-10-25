@@ -129,6 +129,24 @@ fn commit_applies_the_changes_and_removes_the_branch() {
 }
 
 #[test]
+fn commit_counts_changes_not_the_folders_holding_them() {
+    if !branches_available() {
+        return;
+    }
+    // Editing deep/er/f.txt copies deep/ and deep/er/ up into the branch;
+    // only the file changed. A new folder does count.
+    let env = Env::new("count");
+    std::fs::create_dir_all(env.ws().join("deep/er")).unwrap();
+    std::fs::write(env.ws().join("deep/er/f.txt"), "old\n").unwrap();
+    assert!(env.run("t", "echo new > deep/er/f.txt; mkdir fresh").status.success());
+    let out = env.foil(&["commit", "t"]).output().unwrap();
+
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "applied 2 changes\n");
+    assert_eq!(env.read("deep/er/f.txt").as_deref(), Some("new\n"));
+}
+
+#[test]
 fn abort_discards_the_changes() {
     if !branches_available() {
         return;

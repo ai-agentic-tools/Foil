@@ -10,11 +10,18 @@ First public release.
   command gets SIGTERM, then SIGKILL after the grace period, and the run
   exits 124. A hung fanout attempt no longer holds up the others.
 - `foil fanout --json`: the attempts, their checks and the best one, on stdout.
+- `examples/django-username`: three Claude Code sessions fix a real Django
+  bug (ticket #30257) in parallel strict branches; the best passing fix is
+  committed. Verified end to end (~20 s, Haiku).
 - `examples/best-of-n`: four agents on one failing test, the smallest passing
   fix committed, a rogue attempt contained (no API key needed; `claude.sh` for
   real Claude Code sessions).
 - Limits and `foil session` name their systemd scope, so foil works when it
   is itself started by `systemd-run --scope`.
+- `foil commit` counts changed paths, not folders overlayfs copied up to
+  hold them ("applied 1 change", not "applied 66 changes").
+- `fanout` records each attempt's own run time; `--json` gives `status` as a
+  number and `timed_out` separately.
 - Release binaries with SHA-256 checksums; `install.sh` can download one.
 - Licensed MIT OR Apache-2.0.
 

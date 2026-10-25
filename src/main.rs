@@ -89,7 +89,7 @@ fn main() {
         Some("pick") => {
             let (_, name) = flags_and_name(rest, &[]);
             finish(foil::fanout::pick(&name).map(|(n, gone)| {
-                println!("applied {n} changes; discarded {}", if gone.is_empty() { "nothing".to_owned() } else { gone.join(", ") });
+                println!("applied {}; discarded {}", n_changes(n), if gone.is_empty() { "nothing".to_owned() } else { gone.join(", ") });
             }))
         }
         // Internal: PID 1 of a strict run, and its network proxy.
@@ -101,7 +101,7 @@ fn main() {
             let force = flags.contains(&"--force");
             let all = flags.contains(&"--all");
             finish(Branch::open(&name).and_then(|b| b.commit(force, all)).map(|n| {
-                println!("applied {n} changes");
+                println!("applied {}", n_changes(n));
             }))
         }
         Some("abort") => {
@@ -491,7 +491,7 @@ fn fanout(args: Vec<OsString>) {
     let picked = match best.filter(|_| pick) {
         Some(i) => match fanout::pick(&results[i].branch) {
             Ok((n, gone)) => {
-                eprintln!("foil: picked {}: applied {n} changes; discarded {} other attempts", results[i].branch, gone.len());
+                eprintln!("foil: picked {}: applied {}; discarded {} other attempts", results[i].branch, n_changes(n), gone.len());
                 true
             }
             Err(err) => {
@@ -506,9 +506,10 @@ fn fanout(args: Vec<OsString>) {
             .iter()
             .map(|a| {
                 format!(
-                    "{{\"branch\":{},\"status\":{},\"check\":{},\"changes\":{},\"seconds\":{:.3},\"log\":{}}}",
+                    "{{\"branch\":{},\"status\":{},\"timed_out\":{},\"check\":{},\"changes\":{},\"seconds\":{:.3},\"log\":{}}}",
                     json_string(&a.branch),
-                    json_string(&status_of(a)),
+                    a.status.map_or("null".to_owned(), |c| c.to_string()),
+                    spec.timeout.is_some() && a.status == Some(TIMED_OUT),
                     a.check.map_or("null".to_owned(), |c| c.to_string()),
                     a.changes,
                     a.seconds,
@@ -565,7 +566,7 @@ fn summarize(name: &str, termination: Termination) {
     let _ = std::io::stdin().read_line(&mut answer);
     match answer.trim() {
         "c" | "commit" => match branch.commit(false, false) {
-            Ok(n) => eprintln!("foil: applied {n} changes"),
+            Ok(n) => eprintln!("foil: applied {}", n_changes(n)),
             Err(err) => eprintln!("foil: {err}"),
         },
         "a" | "abort" => match branch.abort(false) {
@@ -731,6 +732,11 @@ fn flags_and_name(args: Vec<OsString>, allowed: &[&'static str]) -> (Vec<&'stati
         }
     }
     (flags, name.unwrap_or_else(|| usage()))
+}
+
+/// "1 change", "3 changes".
+fn n_changes(n: usize) -> String {
+    format!("{n} change{}", if n == 1 { "" } else { "s" })
 }
 
 /// `text` as a JSON string literal.

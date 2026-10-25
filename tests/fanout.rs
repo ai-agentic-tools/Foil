@@ -158,7 +158,7 @@ fn a_hung_attempt_times_out_and_json_reports_every_attempt() {
     assert!(started.elapsed() < std::time::Duration::from_secs(20), "{stderr}");
     assert!(stderr.contains("timeout"), "{stderr}");
     assert!(stdout.starts_with("{\"base\":\"t\",\"best\":\"t-2\",\"picked\":true,"), "{stdout}");
-    assert!(stdout.contains("{\"branch\":\"t-1\",\"status\":\"timeout\",\"check\":false,\"changes\":0,"), "{stdout}");
+    assert!(stdout.contains("{\"branch\":\"t-1\",\"status\":124,\"timed_out\":true,\"check\":false,\"changes\":0,"), "{stdout}");
     assert_eq!(stdout.matches("\"branch\":").count(), 3, "{stdout}");
     assert_eq!(env.read("answer.txt").as_deref(), Some("2\n"));
     assert_eq!(env.branches(), "");

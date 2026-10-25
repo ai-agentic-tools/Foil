@@ -31,34 +31,42 @@ foil commit fix-login              # apply it (or: foil abort fix-login)
 No root, no daemon, no container image, no copy: one static 2 MB binary on
 plain Linux.
 
-## Demo: best of N agents, safely
+## Demo: three agents fix a real Django bug
 
-Ask an agent four times and you get four different fixes: some wrong, one
-perhaps malicious because it read a poisoned issue. Branches are cheap, so
-run them all, let the tests decide, and keep the winner:
+[Django ticket #30257](https://code.djangoproject.com/ticket/30257): the
+username validators accepted `"alice\n"`. [`examples/django-username`](examples/django-username)
+rewinds Django to that bug and lets three Claude Code sessions fix it at once,
+each in its own branch of the 6 000-file checkout. foil checks every branch
+and commits the best passing fix. A real run:
+
+```
+foil: 3 attempts of username in 18.8 s
+  attempt      status   check  changes  time
+  username-1   0        pass   1        17.6 s
+  username-2   0        pass   1        13.3 s
+  username-3   0        pass   1        15.6 s
+
+== What each agent could reach (the same sandbox, probed)
+API key it sees:  foil-injects-the-real-key
+~/.ssh:           ls: cannot access '/home/me/.ssh': No such file or directory
+processes:        5 visible
+example.com:      urllib.error.URLError: <urlopen error Tunnel connection failed: 403 Forbidden>
+
+== foil pick username-1
+applied 1 change; discarded username-2, username-3
+```
+
+The same in your repo:
 
 ```sh
-foil fanout -n 4 --agent claude --timeout 15m --check "make test" -- -p "fix issue #123"
+foil fanout -n 3 --agent claude --timeout 15m --check "make test" -- -p "fix issue #123"
 ```
 
-[`examples/best-of-n/demo.sh`](examples/best-of-n) does this end to end in
-ten seconds, with scripted agents (no API key):
-
-```
-foil: 4 attempts of fix in 5.2 s
-  attempt  status   check  changes  time
-  fix-1   0        fail   1        0.0 s     wrong fix
-  fix-2   0        pass   3        0.0 s     right, but rewrites three files
-  fix-3   0        pass   1        0.0 s     right and minimal  <- best
-  fix-4   timeout  fail   0        5.0 s     rogue: read ~/.ssh, backdoor, phone home, hang
-```
-
-The rogue attempt finds no `~/.ssh`, no secrets, no network and only its
-own processes, and `--timeout` stops it. `foil pick fix-3` commits the
-winner and discards the rest. [`claude.sh`](examples/best-of-n/claude.sh)
-runs the same with three real Claude Code sessions; [`demo.sh`](demo.sh)
-shows a single misbehaving agent contained by `--protect`, `--no-network`
-and `--memory`.
+No API key? [`examples/best-of-n/demo.sh`](examples/best-of-n) runs in five
+seconds with scripted agents, one of which goes rogue (reads `~/.ssh`, plants
+a backdoor, phones home, hangs) and gets nothing. [`demo.sh`](demo.sh) shows a
+single misbehaving agent contained by `--protect`, `--no-network` and
+`--memory`.
 
 ## Why
 

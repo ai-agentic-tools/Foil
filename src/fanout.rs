@@ -68,7 +68,18 @@ pub fn run(plan: &Plan) -> io::Result<Vec<Attempt>> {
         }
         cmd.arg("--").args(&plan.command).env("FOIL_ATTEMPT", i.to_string());
         cmd.stdin(Stdio::null()).stdout(out.try_clone()?).stderr(out);
-        running.push((branch, log, Instant::now(), cmd.spawn()?));
+        match cmd.spawn() {
+            Ok(child) => running.push((branch, log, Instant::now(), child)),
+            Err(err) => {
+                // Don't leave the attempts already started running unattended.
+                // (SIGKILL to foil also ends their commands: dead-man's switch.)
+                for (_, _, _, mut child) in running {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                return Err(err);
+            }
+        }
     }
 
     let mut attempts = Vec::new();

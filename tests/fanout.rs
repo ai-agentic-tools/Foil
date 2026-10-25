@@ -143,6 +143,28 @@ fn strict_attempts_get_their_number_too() {
 }
 
 #[test]
+fn a_hung_attempt_times_out_and_json_reports_every_attempt() {
+    if !branches_available() {
+        return;
+    }
+    let env = Env::new("timeout");
+    // Attempt 1 hangs; attempts 2 and 3 answer.
+    let script = "[ $FOIL_ATTEMPT = 1 ] && exec sleep 60; echo $FOIL_ATTEMPT > answer.txt";
+    let started = std::time::Instant::now();
+    let out = env.foil(&["fanout", "-n", "3", "--name", "t", "--timeout", "1s", "--check", CHECK, "--json", "--pick", "--", "sh", "-c", script]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+
+    assert!(out.status.success(), "{stderr}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(20), "{stderr}");
+    assert!(stderr.contains("timeout"), "{stderr}");
+    assert!(stdout.starts_with("{\"base\":\"t\",\"best\":\"t-2\",\"picked\":true,"), "{stdout}");
+    assert!(stdout.contains("{\"branch\":\"t-1\",\"status\":\"timeout\",\"check\":false,\"changes\":0,"), "{stdout}");
+    assert_eq!(stdout.matches("\"branch\":").count(), 3, "{stdout}");
+    assert_eq!(env.read("answer.txt").as_deref(), Some("2\n"));
+    assert_eq!(env.branches(), "");
+}
+
+#[test]
 fn fanout_refuses_its_own_branch_options_and_bad_pick_names() {
     let env = Env::new("usage");
     let out = env.foil(&["fanout", "-n", "2", "-b", "x", "--", "true"]);

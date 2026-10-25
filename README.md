@@ -28,8 +28,37 @@ foil diff --patch fix-login        # review exactly what changed
 foil commit fix-login              # apply it (or: foil abort fix-login)
 ```
 
-No root, no daemon, no container image, no copy: one static 1 MB binary on
-plain Linux. `./demo.sh` shows a misbehaving "agent" being contained, in two minutes.
+No root, no daemon, no container image, no copy: one static 2 MB binary on
+plain Linux.
+
+## Demo: best of N agents, safely
+
+Ask an agent four times and you get four different fixes: some wrong, one
+perhaps malicious because it read a poisoned issue. Branches are cheap, so
+run them all, let the tests decide, and keep the winner:
+
+```sh
+foil fanout -n 4 --agent claude --timeout 15m --check "make test" -- -p "fix issue #123"
+```
+
+[`examples/best-of-n/demo.sh`](examples/best-of-n) does this end to end in
+ten seconds, with scripted agents (no API key):
+
+```
+foil: 4 attempts of fix in 5.2 s
+  attempt  status   check  changes  time
+  fix-1   0        fail   1        0.0 s     wrong fix
+  fix-2   0        pass   3        0.0 s     right, but rewrites three files
+  fix-3   0        pass   1        0.0 s     right and minimal  <- best
+  fix-4   timeout  fail   0        5.0 s     rogue: read ~/.ssh, backdoor, phone home, hang
+```
+
+The rogue attempt finds no `~/.ssh`, no secrets, no network and only its
+own processes, and `--timeout` stops it. `foil pick fix-3` commits the
+winner and discards the rest. [`claude.sh`](examples/best-of-n/claude.sh)
+runs the same with three real Claude Code sessions; [`demo.sh`](demo.sh)
+shows a single misbehaving agent contained by `--protect`, `--no-network`
+and `--memory`.
 
 ## Why
 
@@ -68,7 +97,9 @@ grow with the workspace: nothing is copied until it is written.*
   is.)
 - **Many attempts at once.** `foil fanout -n 3 --check "make test" -- ...`
   runs three attempts in parallel branches, checks each, and `foil pick`
-  commits the best.
+  commits the best (`--json` for harnesses).
+- **`--timeout 10m`**: a run that hangs is stopped (SIGTERM, then SIGKILL)
+  and exits 124, like `timeout(1)`.
 - **`--protect`**: the whole filesystem is read-only to the command except
   the branch, `/tmp`, `/var/tmp`, `/dev/shm` and any `--allow-write PATH`.
   An agent cannot touch `~/.ssh`, your dotfiles, other repos, or the
@@ -101,10 +132,14 @@ Linux, kernel 5.12 or newer (Ubuntu 22.04+, Debian 12+, Fedora 36+).
 Tested on x86_64; other architectures build from source but are untested.
 
 ```sh
-git clone <this repo> && cd foil
-./install.sh          # builds a static binary into /usr/local/bin, runs `foil setup` if needed
+curl -fsSL https://raw.githubusercontent.com/umbarsariya/foil/main/install.sh | sh
 foil doctor           # what works on this machine, and how to fix what doesn't
 ```
+
+The script downloads the latest release binary, checks its SHA-256, puts it
+in `/usr/local/bin` and runs `foil setup` where needed. To build from
+source instead: `git clone https://github.com/umbarsariya/foil && cd foil &&
+./install.sh` (needs Rust; `musl-tools` for a static binary).
 
 **Ubuntu 23.10 and later** only let approved programs create user
 namespaces. `sudo foil setup` installs a small AppArmor profile approving the
@@ -193,9 +228,10 @@ foil run [options] [--] <command> [args...]
   --memory SIZE         memory limit, e.g. 2G
   --cpus N              CPU limit, e.g. 1.5
   --pids N              process and thread limit
+  --timeout TIME        stop the command after TIME (90s, 10m, 2h); exit 124
 foil agent NAME [run options] [-- agent args]    NAME: claude, codex
 foil diff [--patch | --json] [--all] NAME
-foil fanout -n N [--check CMD] [--agent NAME] [--name BASE] [--pick] [run options] [--] ...
+foil fanout -n N [--check CMD] [--agent NAME] [--name BASE] [--pick] [--json] [run options] [--] ...
 foil pick NAME
 foil session [--] <command> [args...]
 foil commit [--force] [--all] NAME
@@ -205,8 +241,9 @@ foil doctor
 foil setup [--print]
 ```
 
-Exit status: the command's own, or 125 if foil could not set the run up,
-126 if the command could not be executed, 127 if it was not found.
+Exit status: the command's own, or 124 if `--timeout` stopped it, 125 if
+foil could not set the run up, 126 if the command could not be executed,
+127 if it was not found.
 
 Environment: `FOIL_HOME` (branch store, default `~/.local/share/foil`; must
 be outside the workspace), `FOIL_GRACE_MS`, `FOIL_NO_SCOPE=1` (never create
@@ -222,6 +259,9 @@ foil is a guard rail, not a security boundary against a determined attacker.
   keep `--allow-host` lists as narrow as the task.
 - **Same kernel.** Isolation uses Linux namespaces, like rootless containers;
   it does not protect against kernel exploits. Use a VM for hostile code.
+- **Interactive strict runs share your terminal** (an agent's TUI needs
+  it); see [SECURITY.md](SECURITY.md) for what that allows on older
+  kernels. Scripts, CI and `foil fanout` are not affected.
 - **`/tmp` is shared** with the rest of the machine under `--protect` (it is
   private under `--strict`).
 - **Commit is per file atomic, not all at once.** Readers of the folder can
@@ -261,3 +301,12 @@ FOIL_REQUIRE_BRANCH=1 FOIL_REQUIRE_LIMITS=1 ... # make skips into failures
 
 Tests that need user namespaces, a delegated cgroup or systemd skip
 themselves where those are missing; CI runs them all, required.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full test setup, and
+[SECURITY.md](SECURITY.md) for the threat model and how to report a
+vulnerability.
+
+## License
+
+Licensed under either of [Apache License 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT), at your option.

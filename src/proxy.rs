@@ -18,8 +18,9 @@
 
 use std::ffi::OsString;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{Shutdown, TcpStream};
+use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -60,11 +61,19 @@ const PROVIDERS: [Provider; 2] = [
     },
 ];
 
+/// The descriptor on which `foil __proxy --ready-fd` reports that it listens.
+pub const READY_FD: i32 = 3;
+
 /// The value the sandbox sees instead of a real key.
 pub const PLACEHOLDER: &str = "foil-injects-the-real-key";
 
 fn provider(name: &str) -> Option<&'static Provider> {
     PROVIDERS.iter().find(|p| p.name == name)
+}
+
+/// The environment variable that holds API `name`'s key.
+pub fn key_env(name: &str) -> Option<&'static str> {
+    provider(name).map(|p| p.key_env)
 }
 
 /// Whether foil's environment holds the key for API `name`.
@@ -118,20 +127,80 @@ pub fn allowed(allow: &[String], host: &str, port: u16) -> bool {
     }
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     allow.iter().any(|entry| {
-        let entry = entry.to_ascii_lowercase();
-        let (pattern, ports) = match entry.rsplit_once(':') {
-            Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty() => (h.to_owned(), p.parse::<u16>().ok()),
-            _ => (entry.clone(), None),
-        };
-        let port_ok = match ports {
-            Some(p) => p == port,
-            None => port == 80 || port == 443,
+        // Port 0: none given.
+        let (pattern, entry_port) = split_host_port(&entry.to_ascii_lowercase(), 0);
+        let pattern = pattern.trim_end_matches('.');
+        let port_ok = match entry_port {
+            0 => port == 80 || port == 443,
+            p => p == port,
         };
         let host_ok = pattern == "*"
             || pattern == host
             || pattern.strip_prefix("*.").is_some_and(|d| host.ends_with(&format!(".{d}")));
         port_ok && host_ok
     })
+}
+
+/// Whether `entry` is a usable `--allow-host` value: `*`, `*.domain`, a
+/// host name or IP address, each optionally with `:port` (IPv6 as `[addr]:port`).
+pub fn valid_allow_entry(entry: &str) -> bool {
+    let (pattern, port) = split_host_port(entry, 0);
+    let has_port = entry.parse::<IpAddr>().is_err() && entry.rsplit_once(':').is_some_and(|(h, _)| !h.contains(':') || h.ends_with(']'));
+    if has_port && port == 0 {
+        return false; // "host:99999", "host:", "host:http"
+    }
+    pattern == "*" || pattern.strip_prefix("*.").map_or_else(|| valid_host(&pattern), valid_host)
+}
+
+/// Whether `host` is named in the allowlist as it is: not only through
+/// `*` or `*.domain`.
+fn named_exactly(allow: &[String], host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    allow.iter().any(|entry| {
+        let (pattern, _) = split_host_port(&entry.to_ascii_lowercase(), 0);
+        pattern.trim_end_matches('.') == host
+    })
+}
+
+/// Addresses of this machine or its local networks: loopback, private,
+/// link-local (cloud metadata at 169.254.169.254), carrier-grade NAT,
+/// unspecified, and the IPv6 equivalents.
+fn is_internal(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || a == 0
+                || (a == 100 && (64..128).contains(&b))
+        }
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => is_internal(IpAddr::V4(v4)),
+            None => {
+                let first = v6.segments()[0];
+                v6.is_loopback() || v6.is_unspecified() || (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+            }
+        },
+    }
+}
+
+/// Connect to an allowed `host:port`. The proxy runs on the host's network,
+/// so a name that resolves to an internal address (by DNS rebinding, or a
+/// disguise like `127.1` or `2130706433`) would reach this machine's own
+/// services: that is only allowed when the allowlist names the host as it
+/// is. The check and the connection use the same resolved address.
+fn connect_allowed(allow: &[String], host: &str, port: u16) -> io::Result<TcpStream> {
+    let addrs: Vec<SocketAddr> = (host, port).to_socket_addrs()?.collect();
+    let exact = named_exactly(allow, host);
+    let usable: Vec<SocketAddr> = addrs.iter().copied().filter(|a| exact || !is_internal(a.ip())).collect();
+    if usable.is_empty() && !addrs.is_empty() {
+        eprintln!("foil: blocked network access to {host}:{port} (resolves to an address of this machine or its network)");
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "internal address"));
+    }
+    TcpStream::connect(&usable[..])
 }
 
 /// A DNS name (letters, digits, '-' and '.', 1-253 bytes, no empty label)
@@ -165,11 +234,12 @@ pub fn main(argv: &[OsString]) -> ! {
         eprintln!("foil __proxy: no socket");
         std::process::exit(2)
     };
-    let (mut allow, mut inject) = (Vec::new(), Vec::new());
+    let (mut allow, mut inject, mut ready) = (Vec::new(), Vec::new(), None);
     while let Some(flag) = args.next() {
         match (flag.as_str(), args.next()) {
             ("--allow", Some(v)) => allow.push(v),
             ("--inject", Some(v)) => inject.push(v),
+            ("--ready-fd", Some(v)) if v.parse::<i32>().is_ok() => ready = v.parse::<i32>().ok(),
             _ => {
                 eprintln!("foil __proxy: bad arguments");
                 std::process::exit(2)
@@ -190,10 +260,32 @@ pub fn main(argv: &[OsString]) -> ! {
             std::process::exit(1)
         }
     };
-    for conn in listener.incoming().flatten() {
+    if let Some(fd) = ready {
+        // SAFETY: foil passed this descriptor for exactly this; we own it now.
+        let mut pipe = unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd) };
+        let _ = pipe.write_all(b"1");
+    }
+    // Connections being served; past the cap new ones are closed at once,
+    // so a flood from the sandbox can't exhaust the proxy's threads or files.
+    static OPEN: AtomicUsize = AtomicUsize::new(0);
+    const MAX_OPEN: usize = 256;
+    for conn in listener.incoming() {
+        let conn = match conn {
+            Ok(conn) => conn,
+            // Out of descriptors (or similar): back off instead of spinning.
+            Err(_) => {
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
+            }
+        };
+        if OPEN.fetch_add(1, Ordering::SeqCst) >= MAX_OPEN {
+            OPEN.fetch_sub(1, Ordering::SeqCst);
+            continue;
+        }
         let config = config.clone();
         std::thread::spawn(move || {
             let _ = handle(conn, &config);
+            OPEN.fetch_sub(1, Ordering::SeqCst);
         });
     }
     std::process::exit(0)
@@ -253,6 +345,8 @@ fn read_head(reader: &mut BufReader<UnixStream>) -> io::Result<Head> {
 }
 
 fn handle(conn: UnixStream, config: &Config) -> io::Result<()> {
+    // A client that opens a connection and sends nothing doesn't hold a thread forever.
+    conn.set_read_timeout(Some(Duration::from_secs(120)))?;
     let mut reader = BufReader::new(conn.try_clone()?);
     let head = read_head(&mut reader)?;
     let mut client = conn;
@@ -261,7 +355,14 @@ fn handle(conn: UnixStream, config: &Config) -> io::Result<()> {
         if !allowed(&config.allow, &host, port) {
             return deny(&mut client, &host, port);
         }
-        let upstream = TcpStream::connect((host.as_str(), port))?;
+        let upstream = match connect_allowed(&config.allow, &host, port) {
+            Ok(upstream) => upstream,
+            Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+                return respond(&mut client, 403, "blocked by foil: internal address");
+            }
+            Err(err) => return respond(&mut client, 502, &format!("foil proxy: {host}:{port}: {err}")),
+        };
+        client.set_read_timeout(None)?;
         client.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")?;
         // Anything the client sent after the head (rare) goes first.
         let early = reader.buffer().to_vec();
@@ -280,10 +381,16 @@ fn handle(conn: UnixStream, config: &Config) -> io::Result<()> {
         if !allowed(&config.allow, &host, port) {
             return deny(&mut client, &host, port);
         }
-        let mut upstream = TcpStream::connect((host.as_str(), port))?;
-        let body = read_body(&mut reader, &head.headers)?;
+        let mut upstream = match connect_allowed(&config.allow, &host, port) {
+            Ok(upstream) => upstream,
+            Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+                return respond(&mut client, 403, "blocked by foil: internal address");
+            }
+            Err(err) => return respond(&mut client, 502, &format!("foil proxy: {host}:{port}: {err}")),
+        };
         upstream.write_all(&rebuild(&head, &path, authority, &[], None))?;
-        upstream.write_all(&body)?;
+        copy_body(&mut reader, &head.headers, &mut upstream)?;
+        client.set_read_timeout(None)?;
         io::copy(&mut upstream, &mut client)?;
         return Ok(());
     }
@@ -310,7 +417,6 @@ fn inject(
     let (authority, prefix) = rest.split_once('/').map_or((rest, String::new()), |(a, p)| (a, format!("/{p}")));
     let (host, port) = split_host_port(authority, if tls { 443 } else { 80 });
     let value = if p.bearer { format!("Bearer {key}") } else { key };
-    let body = read_body(reader, &head.headers)?;
     let request = rebuild(head, &format!("{prefix}{path}"), authority, &["x-api-key", "authorization"], Some((p.header, &value)));
     let tcp = TcpStream::connect((host.as_str(), port))?;
     tcp.set_read_timeout(Some(Duration::from_secs(600)))?;
@@ -320,13 +426,15 @@ fn inject(
         let conn = rustls::ClientConnection::new(config.tls.clone(), name).map_err(io::Error::other)?;
         let mut stream = rustls::StreamOwned::new(conn, tcp);
         stream.write_all(&request)?;
-        stream.write_all(&body)?;
+        copy_body(reader, &head.headers, &mut stream)?;
         stream.flush()?;
+        client.set_read_timeout(None)?;
         copy_until_close(&mut stream, client)
     } else {
         let mut stream = tcp;
         stream.write_all(&request)?;
-        stream.write_all(&body)?;
+        copy_body(reader, &head.headers, &mut stream)?;
+        client.set_read_timeout(None)?;
         copy_until_close(&mut stream, client)
     }
 }
@@ -364,29 +472,49 @@ fn rebuild(head: &Head, path: &str, authority: &str, strip: &[&str], add: Option
     out.into_bytes()
 }
 
-/// The request body, by Content-Length or chunked encoding (kept as is).
-fn read_body(reader: &mut BufReader<UnixStream>, headers: &[(String, String)]) -> io::Result<Vec<u8>> {
+/// Copy the request body, by Content-Length or chunked encoding (kept as
+/// is), from the client to `to` as it arrives: a body is never held in
+/// memory, so a huge one costs time, not the proxy.
+fn copy_body(reader: &mut BufReader<UnixStream>, headers: &[(String, String)], to: &mut impl Write) -> io::Result<()> {
+    let bad = |what: &str| io::Error::new(io::ErrorKind::InvalidData, what.to_owned());
     let get = |name: &str| headers.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str());
+    let copy_exact = |reader: &mut BufReader<UnixStream>, to: &mut dyn Write, len: u64| -> io::Result<()> {
+        if io::copy(&mut reader.by_ref().take(len), to)? != len {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "request body ended early"));
+        }
+        Ok(())
+    };
     if get("transfer-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("chunked")) {
-        let mut body = Vec::new();
         loop {
             let mut size_line = String::new();
-            reader.read_line(&mut size_line)?;
-            body.extend_from_slice(size_line.as_bytes());
-            let size = usize::from_str_radix(size_line.trim().split(';').next().unwrap_or("0"), 16)
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad chunk size"))?;
-            let mut chunk = vec![0u8; size + 2];
-            reader.read_exact(&mut chunk)?;
-            body.extend_from_slice(&chunk);
-            if size == 0 {
-                return Ok(body);
+            if read_line_limited(reader, &mut size_line, 1024)? == 0 {
+                return Err(bad("request body ended early"));
             }
+            to.write_all(size_line.as_bytes())?;
+            let size = u64::from_str_radix(size_line.trim().split(';').next().unwrap_or("").trim(), 16)
+                .map_err(|_| bad("bad chunk size"))?;
+            if size == 0 {
+                // Trailer lines, up to the empty line that ends the body.
+                loop {
+                    let mut line = String::new();
+                    if read_line_limited(reader, &mut line, 16 * 1024)? == 0 {
+                        return Err(bad("request body ended early"));
+                    }
+                    to.write_all(line.as_bytes())?;
+                    if line.trim_end_matches(['\r', '\n']).is_empty() {
+                        return Ok(());
+                    }
+                }
+            }
+            // The chunk and the line end after it.
+            copy_exact(reader, to, size.checked_add(2).ok_or_else(|| bad("bad chunk size"))?)?;
         }
     }
-    let len: usize = get("content-length").and_then(|v| v.parse().ok()).unwrap_or(0);
-    let mut body = vec![0u8; len];
-    reader.read_exact(&mut body)?;
-    Ok(body)
+    let len = match get("content-length") {
+        Some(v) => v.trim().parse::<u64>().map_err(|_| bad("bad Content-Length"))?,
+        None => 0,
+    };
+    copy_exact(reader, to, len)
 }
 
 fn tunnel(client: UnixStream, early: Vec<u8>, upstream: TcpStream) -> io::Result<()> {
@@ -404,7 +532,10 @@ fn tunnel(client: UnixStream, early: Vec<u8>, upstream: TcpStream) -> io::Result
 }
 
 fn split_host_port(authority: &str, default: u16) -> (String, u16) {
-    // [v6]:port, host:port, or host.
+    // [v6]:port, host:port, or host (a bare IPv6 address included).
+    if authority.parse::<IpAddr>().is_ok() {
+        return (authority.to_owned(), default);
+    }
     if let Some(rest) = authority.strip_prefix('[') {
         if let Some((h, p)) = rest.split_once(']') {
             return (h.to_owned(), p.strip_prefix(':').and_then(|p| p.parse().ok()).unwrap_or(default));
@@ -448,6 +579,19 @@ mod tests {
         assert!(!allowed(&allow, "127.0.0.1", 443));
         assert!(!allowed(&[], "anything", 443));
         assert!(allowed(&["*".to_owned()], "anything", 443));
+        assert!(allowed(&["[::1]:8080".to_owned()], "::1", 8080));
+        assert!(allowed(&["::1".to_owned()], "::1", 443));
+        assert!(allowed(&["example.com.".to_owned()], "example.com", 443));
+    }
+
+    #[test]
+    fn allow_entries_are_checked() {
+        for ok in ["example.com", "example.com:8443", "*.example.com", "*", "10.0.0.1:80", "::1", "[::1]:80"] {
+            assert!(valid_allow_entry(ok), "{ok}");
+        }
+        for bad in ["example.com:99999", "example.com:", "example.com:http", "ex ample.com", "*.", "http://example.com", ""] {
+            assert!(!valid_allow_entry(bad), "{bad}");
+        }
     }
 
     #[test]
@@ -468,6 +612,39 @@ mod tests {
         }
         assert!(valid_host("a-b.allowed.test") && valid_host("10.0.0.1") && valid_host("::1") && valid_host("x.test."));
         assert!(!valid_host(&"a".repeat(64)) && !valid_host(&format!("{}.test", "a.".repeat(130))));
+    }
+
+    #[test]
+    fn internal_addresses() {
+        for ip in ["127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.1", "169.254.169.254", "100.64.0.1", "0.0.0.0", "::1", "fd00::1", "fe80::1", "::ffff:127.0.0.1"] {
+            assert!(is_internal(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in ["1.1.1.1", "160.79.104.10", "2606:4700::1111", "100.128.0.1"] {
+            assert!(!is_internal(ip.parse().unwrap()), "{ip}");
+        }
+        let allow: Vec<String> = ["127.0.0.1:8080", "*.example.com", "[::1]:80"].map(String::from).to_vec();
+        assert!(named_exactly(&allow, "127.0.0.1") && named_exactly(&allow, "::1"));
+        assert!(!named_exactly(&allow, "x.example.com") && !named_exactly(&["*".to_owned()], "127.0.0.1"));
+    }
+
+    #[test]
+    fn bodies_are_copied_exactly() {
+        let body = |headers: &[(&str, &str)], input: &[u8]| -> io::Result<Vec<u8>> {
+            let (mut a, b) = UnixStream::pair()?;
+            a.write_all(input)?;
+            drop(a);
+            let headers: Vec<(String, String)> = headers.iter().map(|(n, v)| (n.to_string(), v.to_string())).collect();
+            let mut out = Vec::new();
+            copy_body(&mut BufReader::new(b), &headers, &mut out)?;
+            Ok(out)
+        };
+        assert_eq!(body(&[("Content-Length", "5")], b"helloEXTRA").unwrap(), b"hello");
+        assert!(body(&[("Content-Length", "50")], b"short").is_err());
+        assert!(body(&[("Content-Length", "-1")], b"").is_err());
+        let chunked = b"5\r\nhello\r\n0\r\nX-Trailer: 1\r\n\r\nNEXT";
+        assert_eq!(body(&[("Transfer-Encoding", "chunked")], chunked).unwrap(), &chunked[..chunked.len() - 4]);
+        assert!(body(&[("Transfer-Encoding", "chunked")], b"ffffffffffffffff\r\n").is_err());
+        assert!(body(&[("Transfer-Encoding", "chunked")], &[b'1'; 5000]).is_err());
     }
 
     #[test]

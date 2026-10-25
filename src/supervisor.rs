@@ -60,12 +60,20 @@ pub struct Outcome {
     pub orphans_reaped: usize,
     /// Whether the command ran inside its own cgroup box.
     pub contained: bool,
+    /// Whether the command was stopped because its time ran out.
+    pub timed_out: bool,
 }
 
 /// Run `argv` as a child, relay signals to it, and wait for it and all of
 /// its descendants to be gone. With `isolation`, the command runs isolated
 /// as it describes: in a branch, read-only, offline (see `isolate.rs`).
 pub fn supervise(argv: &[OsString], isolation: Option<&Plan>) -> io::Result<Outcome> {
+    supervise_for(argv, isolation, None)
+}
+
+/// [`supervise`], but give the command at most `timeout`: then it gets
+/// SIGTERM, the grace period, and SIGKILL, like everything it left behind.
+pub fn supervise_for(argv: &[OsString], isolation: Option<&Plan>, timeout: Option<Duration>) -> io::Result<Outcome> {
     let (program, args) = argv
         .split_first()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no command given"))?;
@@ -138,7 +146,8 @@ pub fn supervise(argv: &[OsString], isolation: Option<&Plan>) -> io::Result<Outc
     let contained = cgroup.as_ref().is_some_and(|cg| cg.contains(pid as u32));
 
     // Cleanup runs even if waiting failed, so an error never leaks the child.
-    let result = wait_for_exit(pid, &sfd);
+    let deadline = timeout.and_then(|t| Instant::now().checked_add(t));
+    let result = wait_for_exit(pid, &sfd, deadline, grace);
     // After an error, skip the grace period and go straight to SIGKILL.
     let spared = match result {
         Ok(_) => grace_period(cgroup.as_ref(), &sfd, grace),
@@ -151,16 +160,24 @@ pub fn supervise(argv: &[OsString], isolation: Option<&Plan>) -> io::Result<Outc
     let drained = drain_descendants();
     // Everything is reaped, so the box is empty; dropping it removes it.
     drop(cgroup);
-    result.map(|(termination, reaped)| Outcome {
+    result.map(|(termination, reaped, timed_out)| Outcome {
         termination,
         orphans_reaped: reaped + spared + drained,
         contained,
+        timed_out,
     })
 }
 
-/// Relay signals to `pid` until it exits; returns its termination and the
-/// number of other (orphaned) children reaped along the way.
-fn wait_for_exit(pid: pid_t, sfd: &OwnedFd) -> io::Result<(Termination, usize)> {
+/// Relay signals to `pid` until it exits; returns its termination, the
+/// number of other (orphaned) children reaped along the way, and whether
+/// `deadline` passed first. At the deadline `pid` gets SIGTERM, and
+/// SIGKILL if it is still there `grace` later.
+fn wait_for_exit(
+    pid: pid_t,
+    sfd: &OwnedFd,
+    mut deadline: Option<Instant>,
+    grace: Duration,
+) -> io::Result<(Termination, usize, bool)> {
     // The child is unreaped, so its PID cannot be recycled yet: no race here.
     let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as c_long, 0 as c_long) };
     if pidfd == -1 {
@@ -175,14 +192,30 @@ fn wait_for_exit(pid: pid_t, sfd: &OwnedFd) -> io::Result<(Termination, usize)> 
 
     let mut status = None;
     let mut orphans = 0;
+    let mut timed_out = false;
     loop {
         reap_exited(pid, &mut status, &mut orphans)?;
         if let Some(termination) = status {
-            return Ok((termination, orphans));
+            return Ok((termination, orphans, timed_out));
         }
+        if let Some(at) = deadline.filter(|at| Instant::now() >= *at) {
+            if timed_out {
+                forward(&pidfd, libc::SIGKILL)?;
+                deadline = None;
+            } else {
+                timed_out = true;
+                forward(&pidfd, libc::SIGTERM)?;
+                deadline = Some(at.checked_add(grace).unwrap_or(at));
+            }
+            continue;
+        }
+        // Wake up at the deadline, rounded up so it has passed by then.
+        let ms = deadline.map_or(-1, |at| {
+            at.saturating_duration_since(Instant::now()).as_nanos().div_ceil(1_000_000).min(c_int::MAX as u128) as c_int
+        });
 
         let mut fds = [pollin(sfd), pollin(&pidfd)];
-        if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) } == -1 {
+        if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, ms) } == -1 {
             let err = io::Error::last_os_error();
             if err.kind() == io::ErrorKind::Interrupted {
                 continue;

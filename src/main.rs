@@ -5,8 +5,11 @@ use std::process::exit;
 
 use foil::branch::Branch;
 use foil::isolate::{self, Options};
-use foil::limits::{parse_size, Limits};
-use foil::supervisor::{exit_like, supervise, Termination};
+use foil::limits::{parse_duration, parse_size, Limits};
+use foil::supervisor::{exit_like, supervise_for, Termination};
+
+/// Exit status of a run stopped by `--timeout`, as with timeout(1).
+const TIMED_OUT: i32 = 124;
 
 const USAGE: &str = "\
 usage: foil run [options] [--] <command> [args...]
@@ -29,15 +32,18 @@ usage: foil run [options] [--] <command> [args...]
          --memory SIZE         memory limit, e.g. 2G (needs systemd)
          --cpus N              CPU limit, e.g. 1.5 (needs systemd)
          --pids N              limit on processes and threads (needs systemd)
+         --timeout TIME        stop the command after TIME (90s, 10m, 2h): SIGTERM,
+                               then SIGKILL after the grace period; exit 124
        foil agent NAME [run options] [-- agent args]
                                run agent NAME (claude, codex) in a strict branch with
                                its profile; afterwards, review and commit or abort
-       foil fanout -n N [--check CMD] [--agent NAME] [--name BASE] [--pick]
+       foil fanout -n N [--check CMD] [--agent NAME] [--name BASE] [--pick] [--json]
                    [run options] [--] <command or agent args...>
                                run N attempts at once, in branches BASE-1..BASE-N
                                (FOIL_ATTEMPT=i in each); CMD scores each attempt in
                                its branch (exit 0 = pass); the best is the passing
-                               attempt with the fewest changes; --pick commits it
+                               attempt with the fewest changes; --pick commits it;
+                               --json prints the results on stdout
        foil pick NAME          commit fanout attempt NAME, discard its siblings
        foil session [--] <command> [args...]
                                run command (an agent harness, a script that starts
@@ -126,6 +132,7 @@ struct RunSpec {
     workspace: Option<PathBuf>,
     options: Options,
     limits: Limits,
+    timeout: Option<std::time::Duration>,
     allow_host: Vec<String>,
     inject: Vec<String>,
     command: Vec<OsString>,
@@ -183,6 +190,7 @@ fn parse_run(args: Vec<OsString>, mut spec: RunSpec) -> RunSpec {
                 Some((k, v)) if !k.is_empty() => o.setenv.push((k.to_owned(), v.to_owned())),
                 _ => bad(&flag, &value),
             },
+            "--timeout" => spec.timeout = Some(parse_duration(&text()).unwrap_or_else(|| bad(&flag, &value))),
             "--memory" => spec.limits.memory = Some(parse_size(&text()).unwrap_or_else(|| bad(&flag, &value))),
             "--cpus" => {
                 let cpus = text().parse::<f64>().ok().filter(|c| c.is_finite() && *c > 0.0);
@@ -212,6 +220,7 @@ fn run_flag_takes_value(flag: &str) -> bool {
             | "--inject-key"
             | "--setenv"
             | "--memory"
+            | "--timeout"
             | "--cpus"
             | "--pids"
     )
@@ -235,6 +244,9 @@ fn execute(spec: &RunSpec) -> Termination {
     }
     if let Err(err) = foil::proxy::check_inject(&spec.inject) {
         fail(err)
+    }
+    if let Some(bad) = spec.allow_host.iter().find(|h| !foil::proxy::valid_allow_entry(h)) {
+        fail(std::io::Error::other(format!("bad --allow-host {bad}: use host, host:port, *.domain or *")));
     }
 
     // With limits, this re-runs foil (with its original arguments) in a
@@ -263,6 +275,10 @@ fn execute(spec: &RunSpec) -> Termination {
     };
     if options.strict {
         options.setenv.push(("FOIL_STATUS_FD".to_owned(), foil::strict::STATUS_FD.to_string()));
+        // For PID 1's grace period; it removes the variable before the command starts.
+        if let Ok(grace) = std::env::var("FOIL_GRACE_MS") {
+            options.setenv.push(("FOIL_GRACE_MS".to_owned(), grace));
+        }
     }
 
     // Keep the branch and its lock alive until the command and everything
@@ -290,11 +306,17 @@ fn execute(spec: &RunSpec) -> Termination {
         Err(err) => fail(err),
     };
 
-    let result = supervise(&spec.command, plan.as_ref());
+    let result = supervise_for(&spec.command, plan.as_ref(), spec.timeout);
     drop(held);
     if let Some((dir, mut child)) = proxy {
-        let _ = child.kill();
-        let _ = child.wait();
+        // The proxy is foil's child, so the supervisor's cleanup normally
+        // stopped and reaped it already: then its PID may belong to someone
+        // else by now, and must not be signalled. Only if it still runs
+        // (supervise failed early) is the PID still its own.
+        if let Ok(None) = child.try_wait() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
     match result {
@@ -307,6 +329,14 @@ fn execute(spec: &RunSpec) -> Termination {
                     "foil: {}: killed for using more memory than --memory allows",
                     spec.command[0].to_string_lossy()
                 );
+            }
+            if outcome.timed_out {
+                eprintln!(
+                    "foil: {}: stopped after --timeout {:.1} s",
+                    spec.command[0].to_string_lossy(),
+                    spec.timeout.unwrap_or_default().as_secs_f64()
+                );
+                return Termination::Exited(TIMED_OUT);
             }
             outcome.termination
         }
@@ -341,10 +371,15 @@ fn agent(args: Vec<OsString>) {
     let mut spec = RunSpec::default();
     spec.options.strict = true;
     spec.options.allow_write = agent::state_paths(profile, &home);
-    spec.options.allow_read = agent::install_dirs(&program);
+    spec.options.allow_read = agent::install_dirs(&program, &home);
     spec.allow_host = profile.hosts.iter().map(|h| h.to_string()).collect();
     if foil::proxy::has_key(profile.inject) {
         spec.inject.push(profile.inject.to_owned());
+    } else if let Some(var) = foil::proxy::key_env(profile.inject) {
+        eprintln!(
+            "foil: {var} is not set, so {name} uses its own login from its state folder, which \
+             the commands it runs can read too. Set {var} and foil's proxy holds the key instead."
+        );
     }
     spec.options.setenv = profile.env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
     // The user's own options come next; whatever follows goes to the agent.
@@ -372,14 +407,18 @@ fn fanout(args: Vec<OsString>) {
         exit(125)
     }
     let mut args = args.into_iter().peekable();
-    let (mut attempts, mut check, mut agent, mut base, mut pick) = (None, None, None, None, false);
+    let (mut attempts, mut check, mut agent, mut base, mut pick, mut json) = (None, None, None, None, false, false);
     // Fanout's own flags may come anywhere among the `foil run` options;
     // those are set aside (with their values) for every attempt.
     let mut rest: Vec<OsString> = Vec::new();
     while let Some(flag) = args.peek().and_then(|a| a.to_str()).map(str::to_owned) {
-        if flag == "--pick" {
+        if flag == "--pick" || flag == "--json" {
             args.next();
-            pick = true;
+            if flag == "--pick" {
+                pick = true;
+            } else {
+                json = true;
+            }
             continue;
         }
         let name = flag.split_once('=').filter(|_| flag.starts_with("--")).map_or(flag.as_str(), |(f, _)| f);
@@ -432,32 +471,65 @@ fn fanout(args: Vec<OsString>) {
         exit(125)
     });
     eprintln!("foil: {} attempts of {} in {:.1} s", plan.attempts, plan.base, started.elapsed().as_secs_f64());
-    eprintln!("  {:<width$}  status  check  changes  time", "attempt", width = plan.base.len() + 3);
+    eprintln!("  {:<width$}  status   check  changes  time", "attempt", width = plan.base.len() + 3);
+    let status_of = |a: &fanout::Attempt| match a.status {
+        Some(TIMED_OUT) if spec.timeout.is_some() => "timeout".to_owned(),
+        Some(code) => code.to_string(),
+        None => "signal".to_owned(),
+    };
     for a in &results {
-        let status = a.status.map_or("signal".to_owned(), |c| c.to_string());
         let check = match a.check {
             Some(true) => "pass",
             Some(false) => "fail",
             None => "-",
         };
-        eprintln!("  {:<width$}  {status:<6}  {check:<5}  {:<7}  {:.1} s", a.branch, a.changes, a.seconds, width = plan.base.len() + 3);
+        let status = status_of(a);
+        eprintln!("  {:<width$}  {status:<7}  {check:<5}  {:<7}  {:.1} s", a.branch, a.changes, a.seconds, width = plan.base.len() + 3);
     }
     eprintln!("logs: {}", results[0].log.parent().map(|p| p.display().to_string()).unwrap_or_default());
-    let Some(best) = fanout::best(&results) else {
-        eprintln!("foil: no attempt passed; branches kept for review (foil diff NAME, foil abort NAME)");
-        exit(1)
+    let best = fanout::best(&results);
+    let picked = match best.filter(|_| pick) {
+        Some(i) => match fanout::pick(&results[i].branch) {
+            Ok((n, gone)) => {
+                eprintln!("foil: picked {}: applied {n} changes; discarded {} other attempts", results[i].branch, gone.len());
+                true
+            }
+            Err(err) => {
+                eprintln!("foil: picking {}: {err}", results[i].branch);
+                false
+            }
+        },
+        None => false,
     };
-    let name = &results[best].branch;
-    if !pick {
-        eprintln!("best: {name}\nreview: foil diff --patch {name}\nkeep it: foil pick {name} (commits it, discards the others)");
-        return;
+    if json {
+        let items: Vec<String> = results
+            .iter()
+            .map(|a| {
+                format!(
+                    "{{\"branch\":{},\"status\":{},\"check\":{},\"changes\":{},\"seconds\":{:.3},\"log\":{}}}",
+                    json_string(&a.branch),
+                    json_string(&status_of(a)),
+                    a.check.map_or("null".to_owned(), |c| c.to_string()),
+                    a.changes,
+                    a.seconds,
+                    json_string(&a.log.to_string_lossy())
+                )
+            })
+            .collect();
+        let best_name = best.map_or("null".to_owned(), |i| json_string(&results[i].branch));
+        println!("{{\"base\":{},\"best\":{best_name},\"picked\":{picked},\"attempts\":[{}]}}", json_string(&plan.base), items.join(","));
     }
-    match fanout::pick(name) {
-        Ok((n, gone)) => eprintln!("foil: picked {name}: applied {n} changes; discarded {} other attempts", gone.len()),
-        Err(err) => {
-            eprintln!("foil: picking {name}: {err}");
+    match best {
+        None => {
+            eprintln!("foil: no attempt passed; branches kept for review (foil diff NAME, foil abort NAME)");
             exit(1)
         }
+        Some(_) if pick && !picked => exit(1),
+        Some(i) if !pick => {
+            let name = &results[i].branch;
+            eprintln!("best: {name}\nreview: foil diff --patch {name}\nkeep it: foil pick {name} (commits it, discards the others)");
+        }
+        Some(_) => {}
     }
 }
 
@@ -539,21 +611,41 @@ fn start_proxy(allow: &[String], inject: &[String]) -> std::io::Result<(PathBuf,
     for name in inject {
         cmd.args(["--inject", name]);
     }
-    // SAFETY: prctl is async-signal-safe. The proxy must not outlive foil.
+    // The proxy writes one byte to this pipe once it listens (or exits, which
+    // closes it): waiting on it costs no polling delay.
+    let mut ready = [0 as libc::c_int; 2];
+    // SAFETY: pipe2 fills in two new descriptors.
+    if unsafe { libc::pipe2(ready.as_mut_ptr(), libc::O_CLOEXEC) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: pipe2 just returned these and nothing else owns them.
+    let (read_end, write_end) = unsafe {
+        use std::os::fd::FromRawFd;
+        (std::fs::File::from_raw_fd(ready[0]), std::os::fd::OwnedFd::from_raw_fd(ready[1]))
+    };
+    let write_fd = std::os::fd::AsRawFd::as_raw_fd(&write_end);
+    cmd.arg("--ready-fd").arg(foil::proxy::READY_FD.to_string());
+    // SAFETY: prctl and dup2 are async-signal-safe. The proxy must not outlive foil.
     unsafe {
-        cmd.pre_exec(|| {
+        cmd.pre_exec(move || {
             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong);
+            // dup2 clears close-on-exec on the copy.
+            if libc::dup2(write_fd, foil::proxy::READY_FD) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
             Ok(())
         });
     }
     let mut child = cmd.spawn()?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while std::os::unix::net::UnixStream::connect(&socket).is_err() {
-        if std::time::Instant::now() > deadline || child.try_wait()?.is_some() {
-            let _ = child.kill();
-            return Err(std::io::Error::other("the network proxy did not start"));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(5));
+    drop(write_end);
+    let mut fds = [libc::pollfd { fd: std::os::fd::AsRawFd::as_raw_fd(&read_end), events: libc::POLLIN, revents: 0 }];
+    // SAFETY: one valid pollfd.
+    let woke = unsafe { libc::poll(fds.as_mut_ptr(), 1, 5000) } == 1;
+    let mut byte = [0u8; 1];
+    if !woke || std::io::Read::read(&mut &read_end, &mut byte).ok() != Some(1) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(std::io::Error::other("the network proxy did not start"));
     }
     Ok((dir, child))
 }

@@ -246,6 +246,68 @@ fn cannot_see_or_signal_other_processes() {
 }
 
 #[test]
+fn cannot_signal_foils_process_group() {
+    if !available() {
+        return;
+    }
+    // The wrapper shell shares foil's process group; kill(0) from inside
+    // would end it. Without a terminal the command has a session of its own.
+    let env = Env::new("pgrp");
+    let out = Command::new("sh")
+        .args(["-c", "\"$0\" run --strict -- sh -c 'kill -USR1 0'; echo wrapper-alive", env!("CARGO_BIN_EXE_foil")])
+        .current_dir(env.root.join("ws"))
+        .env("HOME", env.root.join("home"))
+        .env("FOIL_HOME", env.root.join("branches"))
+        .output()
+        .unwrap();
+    assert!(text(&out.stdout).contains("wrapper-alive"), "{:?} {}", out.status, text(&out.stderr));
+}
+
+#[test]
+fn cannot_use_descriptors_foil_inherited() {
+    if !available() {
+        return;
+    }
+    // An open folder outside the view would allow openat(fd, "..") walks.
+    let env = Env::new("fds");
+    let out = Command::new("sh")
+        .args([
+            "-c",
+            "exec 7<\"$1\"; \"$0\" run --strict -- sh -c '[ -e /proc/self/fd/7 ] && echo LEAKED || echo closed'",
+            env!("CARGO_BIN_EXE_foil"),
+            &env.path("other"),
+        ])
+        .current_dir(env.root.join("ws"))
+        .env("HOME", env.root.join("home"))
+        .env("FOIL_HOME", env.root.join("branches"))
+        .output()
+        .unwrap();
+    assert_eq!(text(&out.stdout), "closed\n", "{}", text(&out.stderr));
+}
+
+#[test]
+fn cannot_reach_this_machine_through_a_wildcard() {
+    if !available() || !has("curl") {
+        return;
+    }
+    // `*` allows any host by name, but not one that resolves to the host's
+    // own services: only a host named exactly may be internal.
+    let env = Env::new("internal");
+    let port = serve_once(|_| "must-not-be-seen".to_owned());
+    let script = format!(
+        "curl -s --noproxy '' -x http://127.0.0.1:3128 http://localhost:{port}/; echo; \
+         curl -s --noproxy '' -p -x http://127.0.0.1:3128 http://localhost:{port}/ || echo tunnel-refused"
+    );
+    let out = env.run(&["--allow-host", &format!("*:{port}")], &script);
+
+    let stdout = text(&out.stdout);
+    assert!(!stdout.contains("must-not-be-seen"), "{stdout}");
+    assert!(text(&out.stderr).contains("resolves to an address of this machine"), "{}", text(&out.stderr));
+    let bad = env.run(&["--allow-host", "example.com:99999"], "true");
+    assert_eq!(bad.status.code(), Some(125), "{}", text(&bad.stderr));
+}
+
+#[test]
 fn cannot_gain_privileges() {
     if !available() {
         return;

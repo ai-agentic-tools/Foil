@@ -68,21 +68,41 @@ pub fn run(plan: &Plan) -> io::Result<Vec<Attempt>> {
         }
         cmd.arg("--").args(&plan.command).env("FOIL_ATTEMPT", i.to_string());
         cmd.stdin(Stdio::null()).stdout(out.try_clone()?).stderr(out);
-        running.push((branch, log, Instant::now(), cmd.spawn()?));
+        match cmd.spawn() {
+            Ok(child) => running.push((branch, log, Instant::now(), child)),
+            Err(err) => {
+                // Don't leave the attempts already started running unattended.
+                // (SIGKILL to foil also ends their commands: dead-man's switch.)
+                for (_, _, _, mut child) in running {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                return Err(err);
+            }
+        }
     }
 
-    let mut attempts = Vec::new();
-    for (branch, log, started, mut child) in running {
-        let status = child.wait()?;
-        attempts.push(Attempt {
-            branch,
-            status: status.code(),
-            seconds: started.elapsed().as_secs_f64(),
-            check: None,
-            changes: 0,
-            log,
-        });
+    // Wait for all of them, noting when each one ends (not when we get to it).
+    let mut attempts: Vec<Option<Attempt>> = running.iter().map(|_| None).collect();
+    while attempts.iter().any(Option::is_none) {
+        for (n, (branch, log, started, child)) in running.iter_mut().enumerate() {
+            if attempts[n].is_some() {
+                continue;
+            }
+            if let Some(status) = child.try_wait()? {
+                attempts[n] = Some(Attempt {
+                    branch: branch.clone(),
+                    status: status.code(),
+                    seconds: started.elapsed().as_secs_f64(),
+                    check: None,
+                    changes: 0,
+                    log: log.clone(),
+                });
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
+    let mut attempts: Vec<Attempt> = attempts.into_iter().flatten().collect();
 
     if let Some(check) = &plan.check {
         // Checks run side by side too, each in its attempt's branch.

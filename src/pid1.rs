@@ -34,7 +34,9 @@ pub fn main(argv: &[OsString]) -> ! {
     };
     let status = take_env("FOIL_STATUS_FD").and_then(|v| v.parse::<c_int>().ok());
     let relay = take_env("FOIL_RELAY");
+    // foil passes its FOIL_GRACE_MS in (a strict run's environment is clean).
     let grace = grace_from_env();
+    std::env::remove_var("FOIL_GRACE_MS");
     if let Some(fd) = status {
         // The command must not inherit it.
         unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
@@ -70,12 +72,26 @@ pub fn main(argv: &[OsString]) -> ! {
         }
     }
 
+    // Descriptors foil's caller left open (a folder, a socket) would be
+    // ways out of the view: the command gets stdio only. PID 1's own are
+    // close-on-exec already; this catches what it inherited.
+    unsafe { libc::syscall(libc::SYS_close_range, 3 as libc::c_long, u32::MAX as libc::c_long, libc::CLOSE_RANGE_CLOEXEC as libc::c_long) };
+    // SAFETY: isatty only inspects the descriptors.
+    let terminal = (0..3).any(|fd| unsafe { libc::isatty(fd) } == 1);
+
     let mut cmd = Command::new(program);
     cmd.args(args);
     unsafe {
-        cmd.pre_exec(|| {
+        cmd.pre_exec(move || {
             let empty = std::mem::zeroed::<libc::sigset_t>();
             libc::pthread_sigmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut());
+            // Without a terminal on stdio, a session of its own: the command
+            // then has no controlling terminal to push keystrokes into
+            // (TIOCSTI) and no way to signal foil's process group (kill(0)).
+            // With one, it needs the terminal; see SECURITY.md.
+            if !terminal {
+                libc::setsid();
+            }
             Ok(())
         });
     }

@@ -557,6 +557,15 @@ fn build_branch(dir: &Path, workspace: &Path) -> io::Result<()> {
     fs::create_dir(dir)?;
     fs::create_dir(dir.join("upper"))?;
     fs::create_dir(dir.join("work"))?;
+    // Before Linux 6.13 every change is stamped by the coarse clock, so a
+    // change made in the same tick just before the branch would carry the
+    // branch's own time and look like a conflict. Start on a fresh tick
+    // (at most one tick, a few ms; give up after 20 ms on a stalled clock).
+    let tick = coarse_now();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(20);
+    while coarse_now() <= tick && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_micros(200));
+    }
     let marker = dir.join("workspace");
     fs::write(&marker, workspace.as_os_str().as_bytes())?;
     // The branch's time (see `conflicts`), with two clocks in play: most
@@ -644,6 +653,9 @@ fn apply(
     // One commit at a time per workspace, so one temporary name per folder is enough.
     let tmp = c".foil-commit.tmp";
     for entry in entries {
+        // A folder that only holds changes (overlayfs copied it up so it could
+        // hold them) is not a change itself; its contents are counted.
+        let mut counts = true;
         let rel = rel.join(entry.file_name());
         if skip.contains(&rel) {
             continue;
@@ -658,6 +670,7 @@ fn apply(
             at::remove_at(d, &name)?;
         } else if kind.is_dir() {
             let keep = existing.is_some_and(|st| at::is_dir(&st)) && !is_opaque(&from);
+            counts = !keep;
             if !keep {
                 at::remove_at(d, &name)?;
                 at::mkdir_at(d, &name)?;
@@ -701,7 +714,7 @@ fn apply(
         } else {
             unreachable!("check_committable refuses other file types");
         }
-        applied += 1;
+        applied += usize::from(counts);
         crash_point()?;
     }
     Ok(applied)

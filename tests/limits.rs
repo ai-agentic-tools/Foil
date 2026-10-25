@@ -112,6 +112,8 @@ fn runs_inside_a_session_get_their_box_without_a_scope_each() {
     let stdout = text(&out.stdout);
     // Both runs sit in a foil box; the second could not have asked systemd
     // (FOIL_NO_SCOPE), so its box came from the session.
-    assert_eq!(stdout.matches("/foil-").count(), 2, "{stdout}");
+    // (A box is a cgroup named foil-<pid>; the session's scope is named foil-session-...)
+    let is_box = |line: &str| line.rsplit('/').next().and_then(|b| b.strip_prefix("foil-")).is_some_and(|n| n.bytes().all(|c| c.is_ascii_digit()));
+    assert_eq!(stdout.lines().filter(|l| is_box(l)).count(), 2, "{stdout}");
     assert!(!stdout.contains("FOIL_SCOPED"));
 }

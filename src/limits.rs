@@ -66,7 +66,7 @@ impl Limits {
         }
         user_session()?;
         let mut cmd = Command::new("systemd-run");
-        cmd.args(["--user", "--scope", "--quiet", "--collect", "-p", "Delegate=yes"]);
+        cmd.args(["--user", "--scope", "--quiet", "--collect", "-p", "Delegate=yes"]).arg(unit("run"));
         if let Some(bytes) = self.memory {
             cmd.args(["-p", &format!("MemoryMax={bytes}"), "-p", "MemorySwapMax=0"]);
         }
@@ -130,8 +130,6 @@ pub fn on_path(program: &str) -> bool {
         .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(program).is_file()))
 }
 
-/// Fail early, with a clear message, when there is no systemd user manager
-/// to talk to (systemd-run itself would print a terse D-Bus error).
 /// Run `command` in one systemd user scope that foil may manage
 /// (`Delegate=yes`), so every `foil run` inside it makes its cleanup box
 /// there directly, instead of asking systemd for a scope of its own. systemd
@@ -151,12 +149,25 @@ pub fn session(command: &[OsString]) -> io::Error {
         return Command::new(program).args(args).exec();
     }
     Command::new("systemd-run")
-        .args(["--user", "--scope", "--quiet", "--collect", "-p", "Delegate=yes", "--"])
+        .args(["--user", "--scope", "--quiet", "--collect", "-p", "Delegate=yes"])
+        .arg(unit("session"))
+        .arg("--")
         .arg(program)
         .args(args)
         .exec()
 }
 
+/// `--unit=` with a name of foil's own. systemd-run's default name comes
+/// from its PID, and foil execs systemd-run in place: when foil itself was
+/// started by `systemd-run --scope`, the default would be the name of the
+/// scope foil is already in, and systemd would refuse it.
+fn unit(kind: &str) -> String {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
+    format!("--unit=foil-{kind}-{}-{nanos:09}", std::process::id())
+}
+
+/// Fail early, with a clear message, when there is no systemd user manager
+/// to talk to (systemd-run itself would print a terse D-Bus error).
 fn user_session() -> io::Result<()> {
     let bus = std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
         || std::env::var_os("XDG_RUNTIME_DIR").is_some_and(|dir| Path::new(&dir).join("bus").exists());
@@ -197,9 +208,42 @@ pub fn parse_size(text: &str) -> Option<u64> {
     (value.is_finite() && bytes >= 1.0 && bytes < u64::MAX as f64).then_some(bytes as u64)
 }
 
+/// A duration like `90`, `90s`, `1.5m`, `2h` or `500ms` (plain numbers are seconds).
+pub fn parse_duration(text: &str) -> Option<std::time::Duration> {
+    let text = text.trim();
+    let (number, unit) = match text.find(|c: char| c.is_ascii_alphabetic()) {
+        Some(i) => text.split_at(i),
+        None => (text, ""),
+    };
+    let scale = match unit.to_ascii_lowercase().as_str() {
+        "ms" => 0.001,
+        "" | "s" => 1.0,
+        "m" => 60.0,
+        "h" => 3600.0,
+        _ => return None,
+    };
+    let seconds = number.trim().parse::<f64>().ok()? * scale;
+    // At least a millisecond; at most a year.
+    (seconds.is_finite() && (0.001..=31_536_000.0).contains(&seconds)).then(|| std::time::Duration::from_secs_f64(seconds))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{cpu_quota_percent, parse_size};
+    use super::{cpu_quota_percent, parse_duration, parse_size};
+    use std::time::Duration;
+
+    #[test]
+    fn durations() {
+        assert_eq!(parse_duration("90"), Some(Duration::from_secs(90)));
+        assert_eq!(parse_duration("30s"), Some(Duration::from_secs(30)));
+        assert_eq!(parse_duration("1.5m"), Some(Duration::from_secs(90)));
+        assert_eq!(parse_duration("2h"), Some(Duration::from_secs(7200)));
+        assert_eq!(parse_duration("250ms"), Some(Duration::from_millis(250)));
+        assert_eq!(parse_duration("0"), None);
+        assert_eq!(parse_duration("-5s"), None);
+        assert_eq!(parse_duration("5d"), None);
+        assert_eq!(parse_duration("soon"), None);
+    }
 
     #[test]
     fn cpu_quotas() {

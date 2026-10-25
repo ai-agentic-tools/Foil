@@ -57,13 +57,22 @@ pub fn find_program(program: &str) -> Option<PathBuf> {
     std::env::split_paths(&path).map(|d| d.join(program)).find(|p| p.is_file())
 }
 
-/// Folders the agent's installation needs to be readable: the folder of
-/// the real program file (after symlinks) and the one above it, which
-/// covers npm packages and versioned installs under the home folder.
-pub fn install_dirs(program: &Path) -> Vec<PathBuf> {
+/// What the agent's installation needs to be readable: the folder of the
+/// real program file (after symlinks) and the one above it, which covers
+/// npm packages and versioned installs under the home folder. Never the
+/// home folder itself or a folder right in it (`~/.local`, `~/.cargo`):
+/// those hold credentials. Then the program file alone stands in for them.
+pub fn install_dirs(program: &Path, home: &Path) -> Vec<PathBuf> {
     let Ok(real) = program.canonicalize() else { return Vec::new() };
+    let home = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+    let too_broad = |d: &Path| home.starts_with(d) || d.parent() == Some(home.as_path());
     let mut dirs: Vec<PathBuf> = real.ancestors().skip(1).take(2).map(Path::to_path_buf).collect();
     dirs.retain(|d| d != Path::new("/") && !["/usr", "/bin", "/opt"].iter().any(|s| d.starts_with(s)));
+    let before = dirs.len();
+    dirs.retain(|d| !too_broad(d));
+    if dirs.len() < before && !dirs.iter().any(|d| real.starts_with(d)) {
+        dirs.push(real);
+    }
     dirs
 }
 
@@ -107,7 +116,32 @@ fn civil(days: i64) -> (i64, u32, u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::civil;
+    use super::{civil, install_dirs};
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn install_dirs_never_show_the_home_folder() {
+        let root = std::env::temp_dir().join(format!("foil-install-dirs-{}", std::process::id()));
+        let home = root.join("home");
+        for dir in ["bin", ".cargo/bin", ".local/share/claude/versions"] {
+            std::fs::create_dir_all(home.join(dir)).unwrap();
+        }
+        for file in ["bin/codex", ".cargo/bin/tool", ".local/share/claude/versions/2.1"] {
+            std::fs::write(home.join(file), "").unwrap();
+        }
+        let home = home.canonicalize().unwrap();
+        let dirs = |rel: &str| install_dirs(&home.join(rel), &home);
+        let under = |rel: &str| home.join(rel);
+        // ~/bin/codex: not ~ or ~/bin, just the program.
+        assert_eq!(dirs("bin/codex"), vec![under("bin/codex")]);
+        // ~/.cargo/bin/tool: ~/.cargo/bin, never ~/.cargo (credentials.toml).
+        assert_eq!(dirs(".cargo/bin/tool"), vec![under(".cargo/bin")]);
+        // A versioned install deeper down keeps both folders.
+        let versions: Vec<PathBuf> = vec![under(".local/share/claude/versions"), under(".local/share/claude")];
+        assert_eq!(dirs(".local/share/claude/versions/2.1"), versions);
+        assert!(install_dirs(Path::new("/nonexistent/x"), &home).is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn dates() {

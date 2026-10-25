@@ -1,6 +1,10 @@
 name: ci
 
-on: [push, pull_request]
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
 
 jobs:
   test:
@@ -97,9 +101,13 @@ jobs:
       - name: Test inside a container
         run: contrib/docker/test-in-container.sh
 
+  # A static binary on every push (kept 7 days); on a v* tag, also a
+  # GitHub release with the binary and its SHA-256 (what install.sh fetches).
   release:
-    needs: test
+    needs: [test, container]
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -109,9 +117,24 @@ jobs:
         run: |
           sudo apt-get install -y musl-tools
           cargo build --release --target x86_64-unknown-linux-musl
+          mkdir dist
+          cp target/x86_64-unknown-linux-musl/release/foil dist/foil-x86_64-linux
+          cd dist && sha256sum foil-x86_64-linux > foil-x86_64-linux.sha256
+      - name: Smoke test the static binary
+        run: |
+          sudo dist/foil-x86_64-linux setup
+          dist/foil-x86_64-linux doctor
+          FOIL=$PWD/dist/foil-x86_64-linux sh examples/best-of-n/demo.sh
       - uses: actions/upload-artifact@v4
         continue-on-error: true
         with:
           name: foil-x86_64-linux
-          path: target/x86_64-unknown-linux-musl/release/foil
+          path: dist/
           retention-days: 7
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes=$(awk -v v="${GITHUB_REF_NAME#v}" '$0 ~ "^## " v {on=1; next} /^## / {on=0} on' CHANGELOG.md)
+          gh release create "$GITHUB_REF_NAME" dist/* --title "foil $GITHUB_REF_NAME" --notes "$notes"

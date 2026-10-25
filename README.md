@@ -318,3 +318,7 @@ vulnerability.
 
 Licensed under either of [Apache License 2.0](LICENSE-APACHE) or
 [MIT license](LICENSE-MIT), at your option.
+
+Free for any use, commercial included. The one condition is credit: keep the
+copyright notice (and, under Apache-2.0, the [NOTICE](NOTICE) file) in copies
+and derived works, so they point back to this project.

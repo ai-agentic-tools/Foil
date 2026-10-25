@@ -26,7 +26,7 @@ First public release.
 - `fanout` records each attempt's own run time; `--json` gives `status` as a
   number and `timed_out` separately.
 - Release binaries with SHA-256 checksums; `install.sh` can download one.
-- Licensed MIT OR Apache-2.0.
+- Licensed MIT OR Apache-2.0: free for any use, with credit (copyright notice, NOTICE file).
 
 Security and reliability fixes from a design review:
 

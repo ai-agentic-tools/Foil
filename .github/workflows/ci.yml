@@ -87,6 +87,26 @@ jobs:
           path: foilbench.json
           retention-days: 7
 
+  # macOS: APFS-clone branches and the Seatbelt sandbox (src/mac/), on
+  # Apple silicon and Intel.
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --all-targets
+      - name: Doctor
+        run: target/debug/foil doctor
+
   # The same suite inside a Docker container, with the settings from
   # contrib/docker/README.md.
   container:
@@ -138,3 +158,39 @@ jobs:
         run: |
           notes=$(awk -v v="${GITHUB_REF_NAME#v}" '$0 ~ "^## " v {on=1; next} /^## / {on=0} on' CHANGELOG.md)
           gh release create "$GITHUB_REF_NAME" dist/* --title "foil $GITHUB_REF_NAME" --notes "$notes"
+
+  # One macOS binary for Apple silicon and Intel (lipo), smoke-tested, and on
+  # a v* tag added to the release the Linux job created.
+  release-macos:
+    needs: [macos, release]
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - name: Universal binary
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          mkdir dist
+          lipo -create -output dist/foil-macos-universal \
+            target/aarch64-apple-darwin/release/foil target/x86_64-apple-darwin/release/foil
+          cd dist && shasum -a 256 foil-macos-universal > foil-macos-universal.sha256
+      - name: Smoke test the binary
+        run: |
+          dist/foil-macos-universal doctor
+          FOIL=$PWD/dist/foil-macos-universal sh examples/best-of-n/demo.sh
+      - uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: foil-macos-universal
+          path: dist/
+          retention-days: 7
+      - name: Add to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" dist/*

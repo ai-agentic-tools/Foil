@@ -1,9 +1,12 @@
 //! `foil __proxy`: the network allowlist for strict runs.
 //!
-//! A strict run has an empty network namespace: no route anywhere. Its only
-//! way out is this proxy, which runs outside the sandbox and listens on a
-//! Unix socket that the view shows at `/run/foil` (PID 1 relays
-//! `127.0.0.1:3128` inside the run to it). Three kinds of request:
+//! A strict run has no network of its own. Its only way out is this proxy,
+//! which runs outside the sandbox. On Linux it listens on a Unix socket that
+//! the view shows at `/run/foil` (PID 1 relays `127.0.0.1:3128` inside the
+//! run's empty network namespace to it). On macOS the run shares the host's
+//! loopback, so the proxy listens on a random loopback port and every
+//! request must carry a per-run token (as proxy credentials, or in the
+//! injection path): other local programs can't use it. Three kinds of request:
 //!
 //! - `CONNECT host:port` (HTTPS through a proxy): tunnelled if the host is
 //!   allowed, refused with 403 otherwise.
@@ -19,7 +22,10 @@
 use std::ffi::OsString;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::TcpListener;
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -61,9 +67,6 @@ const PROVIDERS: [Provider; 2] = [
     },
 ];
 
-/// The descriptor on which `foil __proxy --ready-fd` reports that it listens.
-pub const READY_FD: i32 = 3;
-
 /// The value the sandbox sees instead of a real key.
 pub const PLACEHOLDER: &str = "foil-injects-the-real-key";
 
@@ -99,9 +102,18 @@ pub fn check_inject(names: &[String]) -> io::Result<()> {
 }
 
 /// The environment a strict run gets so its HTTP clients use the proxy at
-/// `127.0.0.1:port`, and the injected APIs through it.
-pub fn sandbox_env(port: u16, inject: &[String]) -> Vec<(String, String)> {
-    let proxy = format!("http://127.0.0.1:{port}");
+/// `127.0.0.1:port`, and the injected APIs through it. With a `token`, it
+/// rides along as proxy credentials and in the injection path.
+pub fn sandbox_env(port: u16, inject: &[String], token: Option<&str>) -> Vec<(String, String)> {
+    let base = format!("http://127.0.0.1:{port}");
+    let proxy = match token {
+        Some(t) => format!("http://foil:{t}@127.0.0.1:{port}"),
+        None => base.clone(),
+    };
+    let inject_root = match token {
+        Some(t) => format!("{base}/__inject/{t}"),
+        None => format!("{base}/__inject"),
+    };
     let mut env = Vec::new();
     for name in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"] {
         env.push((name.to_owned(), proxy.clone()));
@@ -110,7 +122,7 @@ pub fn sandbox_env(port: u16, inject: &[String]) -> Vec<(String, String)> {
         env.push((name.to_owned(), "localhost,127.0.0.1,::1".to_owned()));
     }
     for p in inject.iter().filter_map(|n| provider(n)) {
-        env.push((p.base_env.to_owned(), format!("{proxy}/__inject/{}{}", p.name, p.base_suffix)));
+        env.push((p.base_env.to_owned(), format!("{inject_root}/{}{}", p.name, p.base_suffix)));
         env.push((p.key_env.to_owned(), PLACEHOLDER.to_owned()));
     }
     env
@@ -224,21 +236,55 @@ pub fn valid_host(host: &str) -> bool {
 struct Config {
     allow: Vec<String>,
     inject: Vec<String>,
+    /// macOS: what every request must carry (see the module comment).
+    token: Option<String>,
     tls: Arc<rustls::ClientConfig>,
 }
 
-/// `foil __proxy SOCKET [--allow HOST]... [--inject NAME]...`
+/// A client connection: a Unix socket (Linux) or loopback TCP (macOS).
+trait Conn: Read + Write + Send + Sized + 'static {
+    fn try_clone_conn(&self) -> io::Result<Self>;
+    fn set_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
+    fn shutdown_write(&self);
+}
+
+impl Conn for UnixStream {
+    fn try_clone_conn(&self) -> io::Result<Self> {
+        self.try_clone()
+    }
+    fn set_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.set_read_timeout(timeout)
+    }
+    fn shutdown_write(&self) {
+        let _ = self.shutdown(Shutdown::Write);
+    }
+}
+
+impl Conn for TcpStream {
+    fn try_clone_conn(&self) -> io::Result<Self> {
+        self.try_clone()
+    }
+    fn set_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.set_read_timeout(timeout)
+    }
+    fn shutdown_write(&self) {
+        let _ = self.shutdown(Shutdown::Write);
+    }
+}
+
+/// `foil __proxy SOCKET|tcp [--allow HOST]... [--inject NAME]... [--token T] [--ready-fd N]`
 pub fn main(argv: &[OsString]) -> ! {
     let mut args = argv.iter().map(|a| a.to_string_lossy().into_owned());
     let Some(socket) = args.next() else {
         eprintln!("foil __proxy: no socket");
         std::process::exit(2)
     };
-    let (mut allow, mut inject, mut ready) = (Vec::new(), Vec::new(), None);
+    let (mut allow, mut inject, mut ready, mut token) = (Vec::new(), Vec::new(), None, None);
     while let Some(flag) = args.next() {
         match (flag.as_str(), args.next()) {
             ("--allow", Some(v)) => allow.push(v),
             ("--inject", Some(v)) => inject.push(v),
+            ("--token", Some(v)) => token = Some(v),
             ("--ready-fd", Some(v)) if v.parse::<i32>().is_ok() => ready = v.parse::<i32>().ok(),
             _ => {
                 eprintln!("foil __proxy: bad arguments");
@@ -252,7 +298,27 @@ pub fn main(argv: &[OsString]) -> ! {
         .expect("ring supports the default TLS versions")
         .with_root_certificates(roots)
         .with_no_client_auth();
-    let config = Arc::new(Config { allow, inject, tls: Arc::new(tls) });
+    let config = Arc::new(Config { allow, inject, token, tls: Arc::new(tls) });
+    exit_with_parent();
+    // Tell foil where we listen ("ready" or the TCP port), once we do.
+    let report = |what: String| {
+        if let Some(fd) = ready {
+            // SAFETY: foil passed this descriptor for exactly this; we own it now.
+            let mut pipe = unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd) };
+            let _ = writeln!(pipe, "{what}");
+        }
+    };
+    if socket == "tcp" {
+        let listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(l) => l,
+            Err(err) => {
+                eprintln!("foil: network proxy: {err}");
+                std::process::exit(1)
+            }
+        };
+        report(listener.local_addr().map(|a| a.port().to_string()).unwrap_or_default());
+        serve(listener.incoming(), &config)
+    }
     let listener = match UnixListener::bind(&socket) {
         Ok(l) => l,
         Err(err) => {
@@ -260,16 +326,32 @@ pub fn main(argv: &[OsString]) -> ! {
             std::process::exit(1)
         }
     };
-    if let Some(fd) = ready {
-        // SAFETY: foil passed this descriptor for exactly this; we own it now.
-        let mut pipe = unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd) };
-        let _ = pipe.write_all(b"1");
-    }
+    report("ready".to_owned());
+    serve(listener.incoming(), &config)
+}
+
+/// The proxy must not outlive the foil that started it. On Linux the
+/// parent-death signal sees to that; macOS has none, so a thread watches
+/// for the parent to go (the proxy is then adopted by launchd).
+fn exit_with_parent() {
+    // SAFETY: getppid has no preconditions.
+    let parent = unsafe { libc::getppid() };
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_millis(250));
+        // SAFETY: as above.
+        if unsafe { libc::getppid() } != parent {
+            std::process::exit(0);
+        }
+    });
+}
+
+/// Accept connections until the listener fails for good.
+fn serve<C: Conn>(incoming: impl Iterator<Item = io::Result<C>>, config: &Arc<Config>) -> ! {
     // Connections being served; past the cap new ones are closed at once,
     // so a flood from the sandbox can't exhaust the proxy's threads or files.
     static OPEN: AtomicUsize = AtomicUsize::new(0);
     const MAX_OPEN: usize = 256;
-    for conn in listener.incoming() {
+    for conn in incoming {
         let conn = match conn {
             Ok(conn) => conn,
             // Out of descriptors (or similar): back off instead of spinning.
@@ -291,6 +373,157 @@ pub fn main(argv: &[OsString]) -> ! {
     std::process::exit(0)
 }
 
+/// A running proxy, as `start` left it.
+pub struct Running {
+    pub child: Child,
+    /// Linux: the private folder holding the socket.
+    pub dir: Option<PathBuf>,
+    /// macOS: the loopback port and the token requests must carry.
+    pub port: Option<u16>,
+    pub token: Option<String>,
+}
+
+impl Running {
+    /// Stop the proxy, if it still runs, and remove its folder.
+    pub fn stop(mut self) {
+        // The proxy is foil's child, so the supervisor's cleanup may have
+        // stopped and reaped it already: then its PID may belong to someone
+        // else by now, and must not be signalled. Only if it still runs is
+        // the PID still its own.
+        if let Ok(None) = self.child.try_wait() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+        if let Some(dir) = self.dir.take() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+/// The descriptor on which `foil __proxy --ready-fd` reports that it listens.
+pub const READY_FD: i32 = 3;
+
+/// Start `foil __proxy`: on Linux on a socket in a fresh private folder, on
+/// macOS on a loopback port with a fresh token. Returns once it accepts
+/// connections.
+pub fn start(allow: &[String], inject: &[String]) -> io::Result<Running> {
+    use std::os::unix::process::CommandExt;
+    let mut cmd = Command::new(std::env::current_exe()?);
+    cmd.arg("__proxy").stdin(Stdio::null());
+    let (dir, token) = if cfg!(target_os = "linux") {
+        use std::os::unix::fs::DirBuilderExt;
+        sweep_proxy_dirs();
+        let dir = std::env::temp_dir().join(format!("foil-proxy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+        cmd.arg(dir.join("proxy.sock"));
+        (Some(dir), None)
+    } else {
+        let token = random_token()?;
+        cmd.arg("tcp").args(["--token", &token]);
+        (None, Some(token))
+    };
+    for host in allow {
+        cmd.args(["--allow", host]);
+    }
+    for name in inject {
+        cmd.args(["--inject", name]);
+    }
+    // The proxy writes one line to this pipe once it listens (or exits,
+    // which closes it): waiting on it costs no polling delay.
+    let (read_end, write_end) = cloexec_pipe()?;
+    let write_fd = std::os::fd::AsRawFd::as_raw_fd(&write_end);
+    cmd.arg("--ready-fd").arg(READY_FD.to_string());
+    // SAFETY: prctl and dup2 are async-signal-safe.
+    unsafe {
+        cmd.pre_exec(move || {
+            // Linux: the proxy must not outlive foil, even a SIGKILLed one.
+            #[cfg(target_os = "linux")]
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong);
+            // dup2 clears close-on-exec on the copy.
+            if libc::dup2(write_fd, READY_FD) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn()?;
+    drop(write_end);
+    let mut fds = [libc::pollfd { fd: std::os::fd::AsRawFd::as_raw_fd(&read_end), events: libc::POLLIN, revents: 0 }];
+    // SAFETY: one valid pollfd.
+    let woke = unsafe { libc::poll(fds.as_mut_ptr(), 1, 5000) } == 1;
+    let mut line = String::new();
+    let _ = woke && BufReader::new(&read_end).read_line(&mut line).is_ok();
+    let line = line.trim();
+    let port = line.parse::<u16>().ok();
+    if line.is_empty() || (token.is_some() && port.is_none()) {
+        let _ = child.kill();
+        let _ = child.wait();
+        if let Some(dir) = &dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        return Err(io::Error::other("the network proxy did not start"));
+    }
+    Ok(Running { child, dir, port, token })
+}
+
+/// A pipe whose two ends close on exec.
+fn cloexec_pipe() -> io::Result<(std::fs::File, std::os::fd::OwnedFd)> {
+    use std::os::fd::FromRawFd;
+    let mut fds = [0 as libc::c_int; 2];
+    // SAFETY: pipe fills in two new descriptors.
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    for fd in fds {
+        // SAFETY: descriptors we just made.
+        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    }
+    // SAFETY: pipe just returned these and nothing else owns them.
+    Ok(unsafe { (std::fs::File::from_raw_fd(fds[0]), std::os::fd::OwnedFd::from_raw_fd(fds[1])) })
+}
+
+/// 32 random hex digits from the system's random source.
+fn random_token() -> io::Result<String> {
+    let mut bytes = [0u8; 16];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Remove the proxy folders of foils that are gone (killed before they
+/// could clean up): ours only, and only if no process has that PID.
+fn sweep_proxy_dirs() {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else { return };
+    // SAFETY: getuid has no preconditions.
+    let me = unsafe { libc::getuid() };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|n| n.strip_prefix("foil-proxy-")) else { continue };
+        let alive = pid.parse::<u32>().is_ok_and(|p| Path::new(&format!("/proc/{p}")).exists());
+        if !alive && entry.metadata().is_ok_and(|m| m.uid() == me && m.is_dir()) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// Standard base64 (with padding), for Basic proxy credentials.
+fn base64(bytes: &[u8]) -> String {
+    const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let n = chunk.iter().enumerate().fold(0u32, |n, (i, &b)| n | u32::from(b) << (16 - 8 * i));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ABC[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
 /// A parsed request head: the request line's parts and the header lines.
 struct Head {
     method: String,
@@ -299,7 +532,7 @@ struct Head {
 }
 
 /// Read one line of at most `limit` bytes (the excess is an error, not memory).
-fn read_line_limited(reader: &mut BufReader<UnixStream>, out: &mut String, limit: usize) -> io::Result<usize> {
+fn read_line_limited<C: Conn>(reader: &mut BufReader<C>, out: &mut String, limit: usize) -> io::Result<usize> {
     let mut bytes = Vec::new();
     let n = reader.by_ref().take(limit as u64 + 1).read_until(b'\n', &mut bytes)?;
     if n > limit {
@@ -314,7 +547,7 @@ fn read_line_limited(reader: &mut BufReader<UnixStream>, out: &mut String, limit
     Ok(n)
 }
 
-fn read_head(reader: &mut BufReader<UnixStream>) -> io::Result<Head> {
+fn read_head<C: Conn>(reader: &mut BufReader<C>) -> io::Result<Head> {
     let mut line = String::new();
     read_line_limited(reader, &mut line, 16 * 1024)?;
     let mut parts = line.split_whitespace();
@@ -344,12 +577,21 @@ fn read_head(reader: &mut BufReader<UnixStream>) -> io::Result<Head> {
     Ok(Head { method, target, headers })
 }
 
-fn handle(conn: UnixStream, config: &Config) -> io::Result<()> {
+fn handle<C: Conn>(conn: C, config: &Config) -> io::Result<()> {
     // A client that opens a connection and sends nothing doesn't hold a thread forever.
-    conn.set_read_timeout(Some(Duration::from_secs(120)))?;
-    let mut reader = BufReader::new(conn.try_clone()?);
+    conn.set_timeout(Some(Duration::from_secs(120)))?;
+    let mut reader = BufReader::new(conn.try_clone_conn()?);
     let head = read_head(&mut reader)?;
     let mut client = conn;
+    if let Some(token) = &config.token {
+        // The injection path carries the token; proxy requests carry it as credentials.
+        let inject_ok = head.target.strip_prefix("/__inject/").and_then(|r| r.split_once('/')).is_some_and(|(t, _)| t == token);
+        let expected = format!("Basic {}", base64(format!("foil:{token}").as_bytes()));
+        let creds_ok = head.headers.iter().any(|(n, v)| n.eq_ignore_ascii_case("proxy-authorization") && *v == expected);
+        if !inject_ok && !creds_ok {
+            return respond(&mut client, 407, "foil proxy: missing or wrong token");
+        }
+    }
     if head.method.eq_ignore_ascii_case("CONNECT") {
         let (host, port) = split_host_port(&head.target, 443);
         if !allowed(&config.allow, &host, port) {
@@ -362,13 +604,16 @@ fn handle(conn: UnixStream, config: &Config) -> io::Result<()> {
             }
             Err(err) => return respond(&mut client, 502, &format!("foil proxy: {host}:{port}: {err}")),
         };
-        client.set_read_timeout(None)?;
+        client.set_timeout(None)?;
         client.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")?;
         // Anything the client sent after the head (rare) goes first.
         let early = reader.buffer().to_vec();
         return tunnel(client, early, upstream);
     }
-    if let Some(rest) = head.target.strip_prefix("/__inject/") {
+    if let Some(mut rest) = head.target.strip_prefix("/__inject/") {
+        if let Some(token) = &config.token {
+            rest = rest.strip_prefix(token.as_str()).and_then(|r| r.strip_prefix('/')).unwrap_or(rest);
+        }
         let (name, path) = rest.split_once('/').map_or((rest, "/".to_owned()), |(n, p)| (n, format!("/{p}")));
         return match provider(name).filter(|p| config.inject.iter().any(|n| n == p.name)) {
             Some(p) => inject(&mut reader, &mut client, &head, p, &path, config),
@@ -390,7 +635,7 @@ fn handle(conn: UnixStream, config: &Config) -> io::Result<()> {
         };
         upstream.write_all(&rebuild(&head, &path, authority, &[], None))?;
         copy_body(&mut reader, &head.headers, &mut upstream)?;
-        client.set_read_timeout(None)?;
+        client.set_timeout(None)?;
         io::copy(&mut upstream, &mut client)?;
         return Ok(());
     }
@@ -399,9 +644,9 @@ fn handle(conn: UnixStream, config: &Config) -> io::Result<()> {
 
 /// Forward one request to `p`'s API with the key added, then stream the
 /// response back. One request per connection (`Connection: close`).
-fn inject(
-    reader: &mut BufReader<UnixStream>,
-    client: &mut UnixStream,
+fn inject<C: Conn>(
+    reader: &mut BufReader<C>,
+    client: &mut C,
     head: &Head,
     p: &Provider,
     path: &str,
@@ -428,20 +673,20 @@ fn inject(
         stream.write_all(&request)?;
         copy_body(reader, &head.headers, &mut stream)?;
         stream.flush()?;
-        client.set_read_timeout(None)?;
+        client.set_timeout(None)?;
         copy_until_close(&mut stream, client)
     } else {
         let mut stream = tcp;
         stream.write_all(&request)?;
         copy_body(reader, &head.headers, &mut stream)?;
-        client.set_read_timeout(None)?;
+        client.set_timeout(None)?;
         copy_until_close(&mut stream, client)
     }
 }
 
 /// Copy a response to the client as it arrives (streamed answers included).
 /// A TLS peer that closes without a close_notify is treated as the end.
-fn copy_until_close(from: &mut impl Read, to: &mut UnixStream) -> io::Result<()> {
+fn copy_until_close(from: &mut impl Read, to: &mut impl Write) -> io::Result<()> {
     let mut buf = [0u8; 16 * 1024];
     loop {
         match from.read(&mut buf) {
@@ -475,10 +720,10 @@ fn rebuild(head: &Head, path: &str, authority: &str, strip: &[&str], add: Option
 /// Copy the request body, by Content-Length or chunked encoding (kept as
 /// is), from the client to `to` as it arrives: a body is never held in
 /// memory, so a huge one costs time, not the proxy.
-fn copy_body(reader: &mut BufReader<UnixStream>, headers: &[(String, String)], to: &mut impl Write) -> io::Result<()> {
+fn copy_body<C: Conn>(reader: &mut BufReader<C>, headers: &[(String, String)], to: &mut impl Write) -> io::Result<()> {
     let bad = |what: &str| io::Error::new(io::ErrorKind::InvalidData, what.to_owned());
     let get = |name: &str| headers.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str());
-    let copy_exact = |reader: &mut BufReader<UnixStream>, to: &mut dyn Write, len: u64| -> io::Result<()> {
+    let copy_exact = |reader: &mut BufReader<C>, to: &mut dyn Write, len: u64| -> io::Result<()> {
         if io::copy(&mut reader.by_ref().take(len), to)? != len {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "request body ended early"));
         }
@@ -517,8 +762,8 @@ fn copy_body(reader: &mut BufReader<UnixStream>, headers: &[(String, String)], t
     copy_exact(reader, to, len)
 }
 
-fn tunnel(client: UnixStream, early: Vec<u8>, upstream: TcpStream) -> io::Result<()> {
-    let (mut c_in, mut u_out) = (client.try_clone()?, upstream.try_clone()?);
+fn tunnel<C: Conn>(client: C, early: Vec<u8>, upstream: TcpStream) -> io::Result<()> {
+    let (mut c_in, mut u_out) = (client.try_clone_conn()?, upstream.try_clone()?);
     u_out.write_all(&early)?;
     let up = std::thread::spawn(move || {
         let _ = io::copy(&mut c_in, &mut u_out);
@@ -526,7 +771,7 @@ fn tunnel(client: UnixStream, early: Vec<u8>, upstream: TcpStream) -> io::Result
     });
     let (mut u_in, mut c_out) = (upstream, client);
     let _ = io::copy(&mut u_in, &mut c_out);
-    let _ = c_out.shutdown(Shutdown::Write);
+    c_out.shutdown_write();
     let _ = up.join();
     Ok(())
 }
@@ -547,14 +792,15 @@ fn split_host_port(authority: &str, default: u16) -> (String, u16) {
     }
 }
 
-fn deny(client: &mut UnixStream, host: &str, port: u16) -> io::Result<()> {
+fn deny(client: &mut impl Write, host: &str, port: u16) -> io::Result<()> {
     eprintln!("foil: blocked network access to {host}:{port} (not in --allow-host)");
     respond(client, 403, "blocked by foil: host not in --allow-host")
 }
 
-fn respond(client: &mut UnixStream, code: u16, text: &str) -> io::Result<()> {
+fn respond(client: &mut impl Write, code: u16, text: &str) -> io::Result<()> {
     let reason = match code {
         403 => "Forbidden",
+        407 => "Proxy Authentication Required",
         404 => "Not Found",
         502 => "Bad Gateway",
         _ => "Bad Request",
@@ -645,6 +891,14 @@ mod tests {
         assert_eq!(body(&[("Transfer-Encoding", "chunked")], chunked).unwrap(), &chunked[..chunked.len() - 4]);
         assert!(body(&[("Transfer-Encoding", "chunked")], b"ffffffffffffffff\r\n").is_err());
         assert!(body(&[("Transfer-Encoding", "chunked")], &[b'1'; 5000]).is_err());
+    }
+
+    #[test]
+    fn base64_encodes() {
+        assert_eq!(base64(b"foil:abc"), "Zm9pbDphYmM=");
+        assert_eq!(base64(b"ab"), "YWI=");
+        assert_eq!(base64(b"abc"), "YWJj");
+        assert_eq!(base64(b""), "");
     }
 
     #[test]

@@ -48,12 +48,14 @@ fn rounds() -> u64 {
     std::env::var("FOIL_KILL_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(20)
 }
 
+#[cfg(target_os = "linux")]
 fn proxy_dirs() -> usize {
     std::fs::read_dir(std::env::temp_dir())
         .map(|d| d.flatten().filter(|e| e.file_name().to_string_lossy().starts_with("foil-proxy-")).count())
         .unwrap_or(0)
 }
 
+#[cfg(target_os = "linux")]
 /// One round: start `foil run <mode...>` with a few background sleepers,
 /// kill foil after `delay_ms`, and require that everything goes away.
 fn round(env: &Env, mode: &[&str], token: &str, delay_ms: u64) -> Result<(), String> {
@@ -74,6 +76,7 @@ fn round(env: &Env, mode: &[&str], token: &str, delay_ms: u64) -> Result<(), Str
 }
 
 #[test]
+#[cfg(target_os = "linux")] // reads /proc; macOS: tests/mac.rs
 fn strict_runs_leave_nothing_when_foil_is_killed() {
     if !branches_available() {
         return;

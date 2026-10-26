@@ -162,6 +162,7 @@ fn abort_discards_the_changes() {
 }
 
 #[test]
+#[cfg(target_os = "linux")] // macOS runs in the clone's own path; see tests/mac.rs
 fn command_keeps_its_path_and_identity() {
     if !branches_available() {
         return;
@@ -208,7 +209,11 @@ fn a_replaced_directory_commits_with_only_its_new_contents() {
     let env = Env::new("replaced");
     assert!(env.run("t", "rm -rf d && mkdir d && echo n > d/new").status.success());
     let diff = env.foil(&["diff", "t"]).output().unwrap();
+    // overlayfs marks the folder replaced; macOS compares its contents.
+    #[cfg(target_os = "linux")]
     assert_eq!(text(&diff.stdout), "R d\nA d/new\n");
+    #[cfg(target_os = "macos")]
+    assert_eq!(text(&diff.stdout), "A d/new\nD d/old\n");
 
     assert!(env.foil(&["commit", "t"]).status().unwrap().success());
     assert_eq!(env.read("d/new").as_deref(), Some("n\n"));
@@ -311,6 +316,7 @@ fn commit_refuses_files_changed_in_the_workspace_since_unless_forced() {
 }
 
 #[test]
+#[cfg(target_os = "linux")] // macOS runs in the clone's own path; see tests/mac.rs
 fn leftovers_of_a_killed_foil_are_stopped_before_the_branch_is_committed() {
     if !branches_available() {
         return;

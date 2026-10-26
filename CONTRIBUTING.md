@@ -5,9 +5,12 @@ contribution: the exact command, `foil doctor` output, and what you expected.
 
 ## Building and testing
 
-foil is Linux-only (namespaces, overlayfs, pidfd, cgroup v2). On macOS or
-Windows, use a Linux VM (e.g. [Lima](https://lima-vm.io): `limactl start
-template://ubuntu`), with the checkout mounted into it.
+foil runs on Linux (namespaces, overlayfs, pidfd, cgroup v2) and macOS
+(APFS clones, Seatbelt: `src/mac/`). On a Mac, `cargo test` runs the macOS
+build natively (`tests/mac.rs` plus the shared tests); for the Linux build,
+use a Linux VM (e.g. [Lima](https://lima-vm.io): `limactl start
+template://ubuntu`) with the checkout mounted into it. On Windows, use a
+Linux VM.
 
 ```sh
 cargo build

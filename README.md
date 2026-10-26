@@ -28,8 +28,8 @@ foil diff --patch fix-login        # review exactly what changed
 foil commit fix-login              # apply it (or: foil abort fix-login)
 ```
 
-No root, no daemon, no container image, no copy: one static 2 MB binary on
-plain Linux.
+No root, no daemon, no container image, no copy: one 2 MB binary, on Linux
+and on macOS.
 
 ## Demo: three agents fix a real Django bug
 
@@ -136,8 +136,8 @@ grow with the workspace: nothing is copied until it is written.*
 
 ## Install
 
-Linux, kernel 5.12 or newer (Ubuntu 22.04+, Debian 12+, Fedora 36+).
-Tested on x86_64; other architectures build from source but are untested.
+Linux, kernel 5.12 or newer (Ubuntu 22.04+, Debian 12+, Fedora 36+), x86_64;
+or macOS 12 or newer, Apple silicon or Intel (see [macOS](#macos)).
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/umbarsariya/foil/main/install.sh | sh
@@ -283,6 +283,34 @@ foil is a guard rail, not a security boundary against a determined attacker.
   rename with "cross-device", so tools like `mv` copy and delete instead:
   slower for big folders, and it fails half-way on a folder whose owner
   removed their own search (`x`) permission. Files rename normally.
+
+## macOS
+
+The same commands work on a Mac, built from what macOS has instead of
+namespaces, overlayfs and cgroups:
+
+| | Linux | macOS |
+|---|---|---|
+| Branch | overlayfs over the workspace's own path, ~25 ms at any size | two APFS clones (`base`, `tree`): ~0.65 s to create for 10 000 files (Intel Mac), ~70 ms per later run; the command works in the clone's path |
+| diff, conflicts | the overlay's upper layer; change times | exact three-way comparison against `base` (~0.2 s for 10 000 files) |
+| `--protect`, `--strict`, `--no-network` | mount, PID, IPC and network namespaces | a Seatbelt profile (the sandbox Chrome, Codex and Claude Code use) |
+| Cleanup | a cgroup per run | every process carries the run's profile, so even detached ones are found and stopped |
+| Limits | `--memory`, `--cpus`, `--pids` | `--memory` as a watchdog; `--timeout` |
+
+Weaker than Linux: a strict run can still see that other processes exist
+and reach macOS system services; tools that wrote absolute paths into the
+repository (a virtualenv inside it) point at the real folder, which a branch
+run may not write; and Seatbelt sandboxes don't nest, so foil can't start
+from inside another sandbox (turn off an agent's own sandbox inside foil).
+For code you don't trust at all, `foil vm` runs Linux foil, with every Linux
+guarantee, in a small Linux VM ([Lima](https://lima-vm.io)) that shares only
+the folders you name:
+
+```sh
+foil vm setup ~/src/app          # once: create the VM, install foil in it
+cd ~/src/app && foil vm run -b try --strict -- make test
+foil vm diff try && foil vm commit try
+```
 
 ## How it works
 

@@ -1,3 +1,4 @@
+#![cfg(target_os = "linux")] // macOS: tests/mac.rs
 //! Tests for the per-run cgroup box. They need a delegated cgroup, e.g.
 //! `systemd-run --user --scope cargo test`. Without one they are skipped,
 //! unless FOIL_REQUIRE_CGROUP is set, which turns a missing box into a failure.

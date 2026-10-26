@@ -66,6 +66,12 @@ reads are not restricted.
 - **One layer.** Each guarantee rests on one kernel mechanism today. A
   second layer (Landlock, seccomp) is planned before 1.0, as is an
   external audit.
+- **macOS.** The guarantees above come from Seatbelt instead of
+  namespaces (see the README's macOS section and `tests/mac.rs`): a strict
+  run can still list other processes and reach Mach system services, shares
+  the machine's loopback (only foil's proxy port is allowed, and the proxy
+  wants a per-run token), and reads outside home folders and other volumes
+  are not hidden. Use `foil vm` for hostile code.
 - **Resource exhaustion** is bounded only with `--memory`, `--cpus`,
   `--pids` and `--timeout`; there is no disk quota yet beyond the
   filesystem's own.

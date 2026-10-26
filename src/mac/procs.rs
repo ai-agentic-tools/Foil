@@ -118,6 +118,17 @@ impl Marker {
     }
 }
 
+impl Marker {
+    /// SIGKILL every process of the run once, without waiting or reaping
+    /// (the caller may still have to collect its own child's status).
+    pub fn kill_all(&self) {
+        for pid in self.members() {
+            // SAFETY: plain kill; the PID was a member a moment ago.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+    }
+}
+
 /// Reap any of our own children that have exited, without waiting.
 pub fn reap_children() {
     let mut status = 0;

@@ -177,7 +177,7 @@ fn run(argv: &[OsString], isolation: Option<&Plan>, timeout: Option<Duration>) -
                 MEMORY_KILLED.store(true, Ordering::SeqCst);
                 // SAFETY: as above.
                 unsafe { libc::kill(pid, libc::SIGKILL) };
-                m.stop_all(Duration::ZERO);
+                m.kill_all();
             }
         }
         // Never wait unbounded: a last line of defence against a missed wake-up.

@@ -222,6 +222,7 @@ fn concurrent_commits_of_disjoint_changes_all_land() {
 /// and once there is room again, `foil commit` finishes. Needs passwordless
 /// sudo to mount a small tmpfs; skipped without it unless FOIL_REQUIRE_SUDO.
 #[test]
+#[cfg(target_os = "linux")] // a tmpfs mount; Linux only
 fn a_full_disk_mid_commit_is_resumable() {
     if !branches_available() {
         return;

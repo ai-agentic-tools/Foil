@@ -56,6 +56,9 @@ pub struct Options {
     pub setenv: Vec<(String, String)>,
     /// Host folder of the network proxy's socket, when a strict run has one.
     pub proxy_dir: Option<PathBuf>,
+    /// Unix sockets the run may create and listen on (`foil serve`'s execd);
+    /// their folders are in `allow_write`, so the socket is the host's too.
+    pub listen: Vec<PathBuf>,
 }
 
 /// Variables a strict run keeps from foil's environment; everything else

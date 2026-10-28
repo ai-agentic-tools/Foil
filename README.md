@@ -245,6 +245,7 @@ foil session [--] <command> [args...]
 foil commit [--force] [--all] NAME
 foil abort [--force] NAME
 foil list [--json]
+foil serve [--listen ADDR] [-w DIR...] [run options]    OpenSandbox's API (below)
 foil doctor
 foil setup [--print]
 ```
@@ -311,6 +312,26 @@ foil vm setup ~/src/app          # once: create the VM, install foil in it
 cd ~/src/app && foil vm run -b try --strict -- make test
 foil vm diff try && foil vm commit try
 ```
+
+## OpenSandbox
+
+`foil serve` speaks [OpenSandbox](https://github.com/alibaba/OpenSandbox)'s
+sandbox API, so its SDKs, CLI and MCP server work with foil unchanged. Each
+sandbox is a branch of your folder (about 25 ms to create on Linux, no
+Docker, no image), and what it changed can be reviewed and committed back:
+
+```sh
+OPEN_SANDBOX_API_KEY=$KEY foil serve --strict &       # in ~/src/app; listens on 127.0.0.1:8080
+```
+
+```python
+sandbox = SandboxSync.create("foil", connection_config=ConnectionConfigSync(domain="127.0.0.1:8080", api_key=KEY))
+sandbox.commands.run("make test")                     # in a branch; ~/src/app is untouched
+```
+
+foil also runs *inside* OpenSandbox sandboxes (best-of-N attempts in one
+sandbox), and a patch for OpenSandbox's server adds foil as a runtime next
+to Docker and Kubernetes. All three: [integrations/opensandbox](integrations/opensandbox/).
 
 ## How it works
 

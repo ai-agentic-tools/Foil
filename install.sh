@@ -5,6 +5,8 @@
 #   curl -fsSL https://raw.githubusercontent.com/umbarsariya/foil/main/install.sh | sh
 #                                       download the latest release (SHA-256 checked)
 #   PREFIX=$HOME/.local ./install.sh    no sudo for the copy (setup still needs it)
+#   FOIL_VERSION=v0.4.0 ... | sh        a given release instead of the latest
+#   FOIL_NO_SETUP=1 ...                 skip the AppArmor setup (image builds)
 set -eu
 PREFIX=${PREFIX:-/usr/local}
 REPO=${FOIL_REPO:-umbarsariya/foil}
@@ -33,7 +35,10 @@ else
     esac
     tmp=$(mktemp -d)
     trap 'rm -rf "$tmp"' EXIT
-    url=https://github.com/$REPO/releases/latest/download/$asset
+    case ${FOIL_VERSION:-latest} in
+    latest) url=https://github.com/$REPO/releases/latest/download/$asset ;;
+    *) url=https://github.com/$REPO/releases/download/$FOIL_VERSION/$asset ;;
+    esac
     echo "downloading $url"
     curl -fsSL -o "$tmp/$asset" "$url"
     curl -fsSL -o "$tmp/$asset.sha256" "$url.sha256"
@@ -51,7 +56,10 @@ $SUDO mkdir -p "$PREFIX/bin"
 $SUDO install -m 0755 "$BIN" "$PREFIX/bin/foil"
 echo "installed $PREFIX/bin/foil"
 
-if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ]; then
+if [ -n "${FOIL_NO_SETUP:-}" ] || [ -e /.dockerenv ] || [ -e /run/.containerenv ]; then
+    # In a container (or an image build) the host's AppArmor decides; nothing to set up here.
+    :
+elif [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ]; then
     echo "this system restricts user namespaces; installing foil's AppArmor profile"
     sudo "$PREFIX/bin/foil" setup
 fi

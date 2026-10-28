@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+OpenSandbox compatibility.
+
+- `foil serve`: OpenSandbox's lifecycle API, with foil branches as
+  sandboxes; each sandbox runs `foil __execd` (OpenSandbox's execd API:
+  commands, sessions, files, metrics) inside one long-lived `foil run`, and
+  the server relays to it. Extra endpoints `diff`, `commit` and `logs`;
+  `networkPolicy` becomes `--strict` + `--allow-host`; sandboxes survive a
+  server restart; pause freezes the run's cgroup (stops its processes
+  without one, and on macOS). The unchanged OpenSandbox Python SDK passes
+  `integrations/opensandbox/sdk_e2e.py` on Linux and macOS.
+- `--listen-socket PATH` for `foil run`: the run may listen on that Unix
+  socket even under `--strict` (what `foil serve` uses).
+- `integrations/opensandbox/`: an image and demo for foil inside an
+  OpenSandbox sandbox, and a patch adding `runtime.type = "foil"` to
+  OpenSandbox's server (with OSEP-0025, a draft proposal).
+- `install.sh`: `FOIL_VERSION` picks a release; `FOIL_NO_SETUP=1` and
+  containers skip the AppArmor setup.
+
 ## 0.4.0 — 2026-10-26
 
 macOS support.

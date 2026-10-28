@@ -182,6 +182,19 @@ impl Branch {
         fs::write(self.dir.join("box"), marker.as_os_str().as_bytes())
     }
 
+    /// Stop (or continue) every process of the run using this branch: all
+    /// of them carry its sandbox marker.
+    pub fn freeze(&self, frozen: bool) -> io::Result<()> {
+        let raw = fs::read(self.dir.join("box")).map_err(|_| io::Error::other(format!("branch {} has no running box to pause", self.name)))?;
+        let marker = Marker::from_denied(Path::new(std::ffi::OsStr::from_bytes(&raw)));
+        let signal = if frozen { libc::SIGSTOP } else { libc::SIGCONT };
+        for pid in marker.members() {
+            // SAFETY: signals a process of this run.
+            unsafe { libc::kill(pid, signal) };
+        }
+        Ok(())
+    }
+
     /// The moment the clones were complete: a tree file whose inode changed
     /// after it may have been changed by a run.
     fn created(&self) -> io::Result<SystemTime> {

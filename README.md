@@ -140,13 +140,13 @@ Linux, kernel 5.12 or newer (Ubuntu 22.04+, Debian 12+, Fedora 36+).
 Tested on x86_64; other architectures build from source but are untested.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/umbarsariya/foil/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/ai-agentic-tools/foil/main/install.sh | sh
 foil doctor           # what works on this machine, and how to fix what doesn't
 ```
 
 The script downloads the latest release binary, checks its SHA-256, puts it
 in `/usr/local/bin` and runs `foil setup` where needed. To build from
-source instead: `git clone https://github.com/umbarsariya/foil && cd foil &&
+source instead: `git clone https://github.com/ai-agentic-tools/foil && cd foil &&
 ./install.sh` (needs Rust; `musl-tools` for a static binary).
 
 **Ubuntu 23.10 and later** only let approved programs create user

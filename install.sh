@@ -2,12 +2,12 @@
 # Install foil into /usr/local/bin (Linux or macOS) and, on Ubuntu, allow it
 # to use user namespaces.
 #   ./install.sh                        from a checkout: build a static binary
-#   curl -fsSL https://raw.githubusercontent.com/umbarsariya/foil/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/ai-agentic-tools/foil/main/install.sh | sh
 #                                       download the latest release (SHA-256 checked)
 #   PREFIX=$HOME/.local ./install.sh    no sudo for the copy (setup still needs it)
 set -eu
 PREFIX=${PREFIX:-/usr/local}
-REPO=${FOIL_REPO:-umbarsariya/foil}
+REPO=${FOIL_REPO:-ai-agentic-tools/foil}
 TARGET=x86_64-unknown-linux-musl
 OS=$(uname -s)
 case $OS in Linux|Darwin) ;; *) echo "foil runs on Linux and macOS" >&2; exit 1 ;; esac

@@ -80,7 +80,7 @@ fn setup(dirs: &[OsString]) -> io::Result<()> {
     run(Command::new("limactl").args(["start", "--tty=false", INSTANCE]))?;
     eprintln!("foil vm: installing foil inside");
     run(Command::new("limactl").args(["shell", INSTANCE, "sh", "-c"]).arg(
-        "curl -fsSL https://raw.githubusercontent.com/umbarsariya/foil/main/install.sh | sh",
+        "curl -fsSL https://raw.githubusercontent.com/ai-agentic-tools/foil/main/install.sh | sh",
     ))?;
     eprintln!("foil vm: ready; try `foil vm doctor`, then `foil vm run -b NAME --strict -- ...` in a shared folder");
     Ok(())

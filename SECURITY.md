@@ -3,7 +3,7 @@
 ## Reporting a vulnerability
 
 Please report security problems privately, through GitHub's
-[private vulnerability reporting](https://github.com/umbarsariya/foil/security/advisories/new),
+[private vulnerability reporting](https://github.com/ai-agentic-tools/foil/security/advisories/new),
 not in a public issue. Include the foil version (`foil --version`), the
 kernel and distribution, the exact command line, and what the command
 inside the run could do that it should not. You'll get an answer within a

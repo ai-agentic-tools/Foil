@@ -35,7 +35,7 @@ index 0000000..fbdf79c
 +## Summary
 +
 +Add a third runtime, `runtime.type = "foil"`, whose sandboxes are copy-on-write
-+branches of a folder on the host, made by [foil](https://github.com/umbarsariya/foil)
++branches of a folder on the host, made by [foil](https://github.com/ai-agentic-tools/foil)
 +(MIT OR Apache-2.0). A sandbox starts in about 25 ms on Linux without Docker,
 +runs on Linux and macOS laptops, and what it changed can be reviewed and
 +applied to the real folder. Every OpenSandbox client (SDKs, CLI, MCP) works
@@ -233,7 +233,7 @@ index fa73ec8..5c3ea4f 100644
 +## `[foil]` — only when `runtime.type = "foil"`
 +
 +Sandboxes are copy-on-write branches of a host folder, served by
-+[`foil serve`](https://github.com/umbarsariya/foil/tree/main/integrations/opensandbox):
++[`foil serve`](https://github.com/ai-agentic-tools/foil/tree/main/integrations/opensandbox):
 +no Docker, millisecond starts, Linux and macOS, and a sandbox's changes can
 +be reviewed and applied to the real folder. `foil serve` runs execd's API in
 +each sandbox; images are not used (`image.uri` is recorded only).
@@ -379,7 +379,7 @@ index 0000000..7751744
 +"""
 +Foil runtime: sandboxes as copy-on-write branches of a host folder.
 +
-+`foil serve` (https://github.com/umbarsariya/foil) implements the lifecycle
++`foil serve` (https://github.com/ai-agentic-tools/foil) implements the lifecycle
 +API itself and runs an execd-compatible daemon in every sandbox. This service
 +forwards the lifecycle calls to it, so OpenSandbox's server, auth, tenancy
 +and tooling front sandboxes that start in milliseconds without Docker, work

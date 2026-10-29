@@ -1,0 +1,20 @@
+name: Feature request
+description: Something foil should do that it doesn't.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do, and where foil gets in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you would like
+      description: How it could work, from the command line or API you'd use.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do now instead

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Pull request and issue templates, and a code of conduct.
+
 ## 0.3.0 — 2026-10-24
 
 First public release.

@@ -69,10 +69,16 @@ jobs:
           sudo target/release/foil setup
       - name: foilbench
         run: FOIL=$PWD/target/release/foil python3 bench/foilbench.py --quick --out foilbench.json
+      # Shared runners have noisy neighbours: a metric over its limit is
+      # measured once more, and fails only if it is over in both runs.
       - name: Gate against the CI baseline
         run: |
           if [ -f bench/baseline-ci.json ]; then
-            python3 bench/foilbench.py --gate bench/baseline-ci.json --tolerance 0.5 foilbench.json
+            python3 bench/foilbench.py --gate bench/baseline-ci.json --tolerance 0.5 foilbench.json || {
+              echo "over the limit: measuring again"
+              FOIL=$PWD/target/release/foil python3 bench/foilbench.py --quick --out foilbench-2.json
+              python3 bench/foilbench.py --gate bench/baseline-ci.json --tolerance 0.5 foilbench.json foilbench-2.json
+            }
           else
             echo "no bench/baseline-ci.json yet: commit this run's foilbench.json as the baseline"
           fi

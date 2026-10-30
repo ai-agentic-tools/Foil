@@ -17,9 +17,11 @@ Measures, with the binary given by $FOIL (default: foil on PATH):
 
 Usage:
   foilbench.py [--quick] [--out results.json]
-  foilbench.py --gate BASELINE.json [--tolerance 0.10] RESULTS.json
+  foilbench.py --gate BASELINE.json [--tolerance 0.10] RESULTS.json [MORE.json ...]
       fails (exit 1) if a metric's median is more than `tolerance` slower than the baseline
       after scaling both by their own spawn_true (so a slower machine is not a regression).
+      With several results, a metric passes if any one run passes it: a real regression
+      shows in every run, a noisy neighbour on a shared machine rarely does twice.
 """
 
 import argparse
@@ -146,16 +148,20 @@ class Bench:
 GATED = ("run_plain", "branch_start", "branch_start_strict", "abort", "commit_1", "branch_start_100k")
 
 
-def gate(baseline, results, tolerance):
-    base_cal, now_cal = baseline["spawn_true"]["p50"], results["spawn_true"]["p50"]
-    scale = now_cal / base_cal if base_cal > 0 else 1.0
+def gate(baseline, runs, tolerance):
+    base_cal = baseline["spawn_true"]["p50"]
+    scales = [r["spawn_true"]["p50"] / base_cal if base_cal > 0 else 1.0 for r in runs]
     worse = []
     for k, v in baseline.items():
-        if k not in GATED or k not in results:
+        if k not in GATED or not any(k in r for r in runs):
             continue
-        limit = v["p50"] * max(scale, 1.0) * (1 + tolerance)
-        mark = "REGRESSION" if results[k]["p50"] > limit else "ok"
-        print(f"{k:22} baseline {v['p50']:9.2f} ms   now {results[k]['p50']:9.2f} ms   limit {limit:9.2f}   {mark}")
+        # The run that did best on this metric, relative to its own limit.
+        now, limit = min(
+            ((r[k]["p50"], v["p50"] * max(scale, 1.0) * (1 + tolerance)) for r, scale in zip(runs, scales) if k in r),
+            key=lambda pair: pair[0] / pair[1],
+        )
+        mark = "REGRESSION" if now > limit else "ok"
+        print(f"{k:22} baseline {v['p50']:9.2f} ms   now {now:9.2f} ms   limit {limit:9.2f}   {mark}")
         if mark != "ok":
             worse.append(k)
     return worse
@@ -167,10 +173,10 @@ def main():
     ap.add_argument("--out")
     ap.add_argument("--gate")
     ap.add_argument("--tolerance", type=float, default=0.10)
-    ap.add_argument("results", nargs="?")
+    ap.add_argument("results", nargs="*")
     a = ap.parse_args()
     if a.gate:
-        worse = gate(json.load(open(a.gate)), json.load(open(a.results)), a.tolerance)
+        worse = gate(json.load(open(a.gate)), [json.load(open(f)) for f in a.results], a.tolerance)
         sys.exit(1 if worse else 0)
     b = Bench(a.quick)
     try:

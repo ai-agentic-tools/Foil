@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/ai-agentic-tools/foil/actions/workflows/ci.yml/badge.svg)](https://github.com/ai-agentic-tools/foil/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/ai-agentic-tools/foil)](https://github.com/ai-agentic-tools/foil/releases/latest)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 **Let AI agents loose on your repo without letting them loose on your machine.**
 
@@ -405,9 +405,10 @@ vulnerability.
 
 ## License
 
-Licensed under either of [Apache License 2.0](LICENSE-APACHE) or
-[MIT license](LICENSE-MIT), at your option.
+[Apache License 2.0](LICENSE). Free for any use, commercial included, with a
+patent grant from every contributor. The one condition is credit: keep the
+copyright notice and the [NOTICE](NOTICE) file in copies and derived works.
 
-Free for any use, commercial included. The one condition is credit: keep the
-copyright notice (and, under Apache-2.0, the [NOTICE](NOTICE) file) in copies
-and derived works, so they point back to this project.
+Contributions are accepted under the [Contributor License Agreement](CLA.md),
+which a bot asks for on your first pull request (one comment, once).
+Releases up to 0.3.0 remain available under MIT or Apache-2.0, as published.

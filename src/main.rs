@@ -64,11 +64,15 @@ usage: foil run [options] [--] <command> [args...]
        foil list [--json]      list branches and their workspaces
        foil doctor             check what works on this machine
        foil setup [--print]    allow foil to use user namespaces (Ubuntu; as root)
+       foil vm setup [DIR...] | foil vm [foil args] | foil vm stop | delete
+                               macOS: run Linux foil in a small Linux VM (Lima),
+                               sharing only DIR..., for code you don't trust at all
        foil --version";
 
 fn main() {
     // Inside a container on Ubuntu: get foil's AppArmor profile back if the
     // runtime started us without it (re-executes once; otherwise returns).
+    #[cfg(target_os = "linux")]
     foil::container::regain_apparmor_profile();
     let mut args = std::env::args_os().skip(1);
     let Some(sub) = args.next() else { usage() };
@@ -93,8 +97,19 @@ fn main() {
             }))
         }
         // Internal: PID 1 of a strict run, and its network proxy.
+        #[cfg(target_os = "linux")]
         Some("__pid1") => foil::pid1::main(rest.strip_prefix(&[OsString::from("--")][..]).unwrap_or(&rest)),
         Some("__proxy") => foil::proxy::main(&rest),
+        #[cfg(target_os = "macos")]
+        Some("__trash") => {
+            if let Some(dir) = rest.first() {
+                foil::branch::empty_trash(std::path::Path::new(dir));
+            }
+        }
+        #[cfg(target_os = "macos")]
+        Some("__guard") => foil::procs::guard_main(&rest),
+        #[cfg(target_os = "macos")]
+        Some("vm") => finish(foil::vm::main(&rest)),
         Some("diff") => diff(rest),
         Some("commit") => {
             let (flags, name) = flags_and_name(rest, &["--force", "--all"]);
@@ -233,6 +248,7 @@ fn run_flag_is_switch(flag: &str) -> bool {
 
 /// Run `spec` to the end and return how its command terminated. Problems
 /// setting the run up end foil with 125 (126/127 if the command can't run).
+#[cfg(target_os = "linux")]
 fn execute(spec: &RunSpec) -> Termination {
     let fail = |err: std::io::Error| -> ! {
         eprintln!("foil: {err}");
@@ -260,13 +276,13 @@ fn execute(spec: &RunSpec) -> Termination {
 
     // The network proxy, outside the sandbox, for an allowlist or injected keys.
     let proxy = if options.strict && (!spec.allow_host.is_empty() || !spec.inject.is_empty()) {
-        match start_proxy(&spec.allow_host, &spec.inject) {
-            Ok((dir, child)) => {
-                options.proxy_dir = Some(dir.clone());
+        match foil::proxy::start(&spec.allow_host, &spec.inject) {
+            Ok(running) => {
+                options.proxy_dir = running.dir.clone();
                 let socket = format!("{}:{}/proxy.sock", isolate::PROXY_PORT, foil::strict::PROXY_DIR);
                 options.setenv.push(("FOIL_RELAY".to_owned(), socket));
-                options.setenv.extend(foil::proxy::sandbox_env(isolate::PROXY_PORT, &spec.inject));
-                Some((dir, child))
+                options.setenv.extend(foil::proxy::sandbox_env(isolate::PROXY_PORT, &spec.inject, None));
+                Some(running)
             }
             Err(err) => fail(err),
         }
@@ -308,17 +324,15 @@ fn execute(spec: &RunSpec) -> Termination {
 
     let result = supervise_for(&spec.command, plan.as_ref(), spec.timeout);
     drop(held);
-    if let Some((dir, mut child)) = proxy {
-        // The proxy is foil's child, so the supervisor's cleanup normally
-        // stopped and reaped it already: then its PID may belong to someone
-        // else by now, and must not be signalled. Only if it still runs
-        // (supervise failed early) is the PID still its own.
-        if let Ok(None) = child.try_wait() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        let _ = std::fs::remove_dir_all(dir);
+    if let Some(proxy) = proxy {
+        proxy.stop();
     }
+    report(spec, result)
+}
+
+/// How a run ended, as foil reports it: the command's own status, or 124
+/// after `--timeout`; foil exits right here if the command never started.
+fn report(spec: &RunSpec, result: std::io::Result<foil::supervisor::Outcome>) -> Termination {
     match result {
         Ok(outcome) => {
             if spec.limits.memory.is_some()
@@ -350,6 +364,75 @@ fn execute(spec: &RunSpec) -> Termination {
             })
         }
     }
+}
+
+/// macOS: the same as above, with an APFS-clone branch and a Seatbelt
+/// profile (see `src/mac/`). Limits never re-run foil here; the proxy
+/// listens on a loopback port with a per-run token.
+#[cfg(target_os = "macos")]
+fn execute(spec: &RunSpec) -> Termination {
+    let fail = |err: std::io::Error| -> ! {
+        eprintln!("foil: {err}");
+        exit(125)
+    };
+    let mut options = spec.options.clone();
+    if (!spec.allow_host.is_empty() || !spec.inject.is_empty()) && !options.strict {
+        fail(std::io::Error::other("--allow-host and --inject-key need --strict"));
+    }
+    if let Err(err) = foil::proxy::check_inject(&spec.inject) {
+        fail(err)
+    }
+    if let Some(bad) = spec.allow_host.iter().find(|h| !foil::proxy::valid_allow_entry(h)) {
+        fail(std::io::Error::other(format!("bad --allow-host {bad}: use host, host:port, *.domain or *")));
+    }
+    if let Err(err) = spec.limits.enforce(&[], false) {
+        fail(err)
+    }
+    let proxy = if options.strict && (!spec.allow_host.is_empty() || !spec.inject.is_empty()) {
+        match foil::proxy::start(&spec.allow_host, &spec.inject) {
+            Ok(running) => {
+                let port = running.port.unwrap_or_default();
+                options.proxy_port = Some(port);
+                options.setenv.extend(foil::proxy::sandbox_env(port, &spec.inject, running.token.as_deref()));
+                Some(running)
+            }
+            Err(err) => fail(err),
+        }
+    } else {
+        None
+    };
+    let mut held = None;
+    let ready = (|| {
+        let overlay = match &spec.branch_name {
+            Some(name) => {
+                let workspace = spec.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+                let branch = Branch::open_or_create(name, &workspace)?;
+                let lock = branch.lock()?;
+                let overlay = branch.overlay()?;
+                held = Some((branch, lock));
+                Some(overlay)
+            }
+            None => None,
+        };
+        let mut plan = isolate::Plan::new(&options, overlay)?;
+        if let Some(p) = &mut plan {
+            p.memory = spec.limits.memory;
+            if let Some((branch, _)) = &held {
+                branch.record_box(&p.marker.denied)?;
+            }
+        }
+        Ok::<_, std::io::Error>(plan)
+    })();
+    let plan = match ready {
+        Ok(plan) => plan,
+        Err(err) => fail(err),
+    };
+    let result = supervise_for(&spec.command, plan.as_ref(), spec.timeout);
+    drop(held);
+    if let Some(proxy) = proxy {
+        proxy.stop();
+    }
+    report(spec, result)
 }
 
 /// `foil agent NAME [run options] [-- agent arguments]`.
@@ -398,6 +481,7 @@ fn fanout(args: Vec<OsString>) {
     use foil::fanout::{self, Plan};
     // All attempts start at once: give them one shared scope (see `foil
     // session`), so they don't each wait for systemd to make their own.
+    #[cfg(target_os = "linux")]
     if std::env::var_os("FOIL_FANOUT_SESSION").is_none() && !foil::cgroup::can_box() {
         std::env::set_var("FOIL_FANOUT_SESSION", "1");
         let me = std::env::current_exe().map(OsString::from).unwrap_or_else(|_| "foil".into());
@@ -575,80 +659,6 @@ fn summarize(name: &str, termination: Termination) {
         },
         _ => eprintln!("foil: kept branch {name}; review with `foil diff --patch {name}`"),
     }
-}
-
-/// Remove the proxy folders of foils that are gone (killed before they
-/// could clean up): ours only, and only if no process has that PID.
-fn sweep_proxy_dirs() {
-    use std::os::unix::fs::MetadataExt;
-    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else { return };
-    // SAFETY: getuid has no preconditions.
-    let me = unsafe { libc::getuid() };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(pid) = name.to_str().and_then(|n| n.strip_prefix("foil-proxy-")) else { continue };
-        let alive = pid.parse::<u32>().is_ok_and(|p| std::path::Path::new(&format!("/proc/{p}")).exists());
-        if !alive && entry.metadata().is_ok_and(|m| m.uid() == me && m.is_dir()) {
-            let _ = std::fs::remove_dir_all(entry.path());
-        }
-    }
-}
-
-/// Start `foil __proxy` on a socket in a fresh private folder; return the
-/// folder and the process once the socket accepts connections.
-fn start_proxy(allow: &[String], inject: &[String]) -> std::io::Result<(PathBuf, std::process::Child)> {
-    use std::os::unix::fs::DirBuilderExt;
-    use std::os::unix::process::CommandExt;
-    sweep_proxy_dirs();
-    let dir = std::env::temp_dir().join(format!("foil-proxy-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
-    let socket = dir.join("proxy.sock");
-    let mut cmd = std::process::Command::new(std::env::current_exe()?);
-    cmd.arg("__proxy").arg(&socket).stdin(std::process::Stdio::null());
-    for host in allow {
-        cmd.args(["--allow", host]);
-    }
-    for name in inject {
-        cmd.args(["--inject", name]);
-    }
-    // The proxy writes one byte to this pipe once it listens (or exits, which
-    // closes it): waiting on it costs no polling delay.
-    let mut ready = [0 as libc::c_int; 2];
-    // SAFETY: pipe2 fills in two new descriptors.
-    if unsafe { libc::pipe2(ready.as_mut_ptr(), libc::O_CLOEXEC) } == -1 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: pipe2 just returned these and nothing else owns them.
-    let (read_end, write_end) = unsafe {
-        use std::os::fd::FromRawFd;
-        (std::fs::File::from_raw_fd(ready[0]), std::os::fd::OwnedFd::from_raw_fd(ready[1]))
-    };
-    let write_fd = std::os::fd::AsRawFd::as_raw_fd(&write_end);
-    cmd.arg("--ready-fd").arg(foil::proxy::READY_FD.to_string());
-    // SAFETY: prctl and dup2 are async-signal-safe. The proxy must not outlive foil.
-    unsafe {
-        cmd.pre_exec(move || {
-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong);
-            // dup2 clears close-on-exec on the copy.
-            if libc::dup2(write_fd, foil::proxy::READY_FD) == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    let mut child = cmd.spawn()?;
-    drop(write_end);
-    let mut fds = [libc::pollfd { fd: std::os::fd::AsRawFd::as_raw_fd(&read_end), events: libc::POLLIN, revents: 0 }];
-    // SAFETY: one valid pollfd.
-    let woke = unsafe { libc::poll(fds.as_mut_ptr(), 1, 5000) } == 1;
-    let mut byte = [0u8; 1];
-    if !woke || std::io::Read::read(&mut &read_end, &mut byte).ok() != Some(1) {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(std::io::Error::other("the network proxy did not start"));
-    }
-    Ok((dir, child))
 }
 
 fn diff(args: Vec<OsString>) {

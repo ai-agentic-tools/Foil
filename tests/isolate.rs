@@ -1,3 +1,4 @@
+#![cfg(target_os = "linux")] // macOS: tests/mac.rs
 //! Tests for `--protect` and `--no-network`. Like branches, they need
 //! unprivileged user namespaces; where those are blocked the tests are
 //! skipped, unless FOIL_REQUIRE_BRANCH is set, which turns a skip into a failure.

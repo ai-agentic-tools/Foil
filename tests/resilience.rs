@@ -18,17 +18,22 @@ const SETUP: &str = "mkdir -p src/deep docs old ro && echo a > a.txt && echo c >
 /// Edits touching every kind of change a commit applies: modify, add,
 /// delete, replace a directory, a type change, a symlink, a FIFO, a hard
 /// link, an xattr, modes, a long name and a read-only directory's content.
-const EDITS: &str = "echo changed > a.txt && rm c.txt && echo new > src/deep/y.rs && mkdir -p new/sub \
+const EDITS_BEFORE: &str = "echo changed > a.txt && rm c.txt && echo new > src/deep/y.rs && mkdir -p new/sub \
     && echo n > new/sub/n && rm -rf old && mkdir old && echo again > old/g && rm docs/readme && mkdir docs/readme \
-    && echo nested > docs/readme/inside && ln -s a.txt link && mkfifo pipe && echo shared > h1 && ln h1 h2 \
-    && python3 -c \"import os; os.setxattr('a.txt', 'user.foil', b'yes')\" && chmod 600 src/deep/x.rs \
+    && echo nested > docs/readme/inside && ln -s a.txt link && mkfifo pipe && echo shared > h1 && ln h1 h2";
+const EDITS_AFTER: &str = "chmod 600 src/deep/x.rs \
     && echo long > $(printf 'L%.0s' $(seq 1 250)) && chmod 755 ro && echo r2 > ro/f && echo r3 > ro/g && chmod 555 ro";
+
+/// The edits, an extended attribute included.
+fn edits() -> String {
+    format!("{EDITS_BEFORE} && {} && {EDITS_AFTER}", common::setx("a.txt", "user.foil", "yes"))
+}
 
 /// The tree a correct commit must produce: the edits applied to a plain copy.
 fn expected(env: &Env) -> std::collections::BTreeMap<std::path::PathBuf, common::Node> {
     let reference = env.root.join("reference");
     copy_tree(&env.ws(), &reference);
-    let out = Env::sh(&reference, EDITS);
+    let out = Env::sh(&reference, &edits());
     assert!(out.status.success(), "{}", text(&out.stderr));
     snapshot(&reference)
 }
@@ -37,7 +42,7 @@ fn prepared(test: &str) -> Env {
     let env = Env::new(test);
     let out = Env::sh(&env.ws(), SETUP);
     assert!(out.status.success(), "{}", text(&out.stderr));
-    let out = env.run("t", EDITS);
+    let out = env.run("t", &edits());
     assert!(out.status.success(), "{}", text(&out.stderr));
     env
 }
@@ -217,6 +222,7 @@ fn concurrent_commits_of_disjoint_changes_all_land() {
 /// and once there is room again, `foil commit` finishes. Needs passwordless
 /// sudo to mount a small tmpfs; skipped without it unless FOIL_REQUIRE_SUDO.
 #[test]
+#[cfg(target_os = "linux")] // a tmpfs mount; Linux only
 fn a_full_disk_mid_commit_is_resumable() {
     if !branches_available() {
         return;
@@ -268,9 +274,12 @@ fn folders_and_files_without_permissions_still_diff_and_commit() {
     assert!(Env::sh(&env.ws(), "mkdir closed && echo a > closed/a && echo s > secret").status.success());
     // The xattr before the chmod: found by the differential test, commit
     // set the mode first and then could not write the xattr.
-    let edits = "echo b > closed/b && chmod 000 closed && echo t > secret \
-        && python3 -c \"import os; os.setxattr('secret', 'user.k', b'v')\" && chmod 000 secret \
-        && mkdir -p new && echo n > new/n && chmod 311 new";
+    let edits = format!(
+        "echo b > closed/b && chmod 000 closed && echo t > secret && {} && chmod 000 secret \
+         && mkdir -p new && echo n > new/n && chmod 311 new",
+        common::setx("secret", "user.k", "v")
+    );
+    let edits = edits.as_str();
     assert!(env.run("t", edits).status.success());
     let reference = env.root.join("reference");
     copy_tree(&env.ws(), &reference);
@@ -342,7 +351,8 @@ fn a_folder_metadata_change_is_shown_by_diff() {
     }
     let env = Env::new("dir-meta");
     assert!(Env::sh(&env.ws(), "mkdir d && echo x > d/f && mkdir m").status.success());
-    let edits = "python3 -c \"import os; os.setxattr('d', 'user.k', b'v')\" && chmod 700 m";
+    let edits = format!("{} && chmod 700 m", common::setx("d", "user.k", "v"));
+    let edits = edits.as_str();
     assert!(env.run("t", edits).status.success());
     let listed = text(&env.foil(&["diff", "t"]).output().unwrap().stdout);
     assert!(listed.lines().any(|l| l == "M d"), "{listed}");
@@ -424,7 +434,8 @@ fn diff_of_a_branch_in_use_leaves_closed_folders_alone() {
     while !ready.exists() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    let upper = env.root.join("home/branches/t/upper/closed");
+    // Where the branch keeps the folder: overlayfs's upper layer, or the macOS clone.
+    let upper = env.root.join(if cfg!(target_os = "macos") { "home/branches/t/tree/closed" } else { "home/branches/t/upper/closed" });
     let mode = |p: &std::path::Path| std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(p).unwrap().permissions()) & 0o7777;
     let out = env.foil(&["diff", "t"]).output().unwrap();
     assert!(!out.status.success(), "{}", text(&out.stdout));

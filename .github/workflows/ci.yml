@@ -57,25 +57,40 @@ jobs:
         run: target/debug/foil doctor
 
   # Speed (family J): measured on every push and kept as an artifact; gated
-  # against bench/baseline-ci.json once one is committed.
+  # against the commit's base (bench/baseline-ci.json is a reference point).
   bench:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build and allow user namespaces
+      # The gate compares this commit with its base (the PR's target, or the
+      # previous commit on a push), built and measured on the same runner,
+      # in turns: runner speed drifts too much for a fixed baseline (main
+      # itself measured 11 to 30 ms for branch_start within a week).
+      - name: Build this commit and its base
         run: |
+          base=${{ github.event.pull_request.base.sha || github.event.before }}
+          git cat-file -e "$base^{commit}" 2>/dev/null || base=$(git rev-parse HEAD~1)
           cargo build --release
-          sudo target/release/foil setup
-      - name: foilbench
-        run: FOIL=$PWD/target/release/foil python3 bench/foilbench.py --quick --out foilbench.json
-      - name: Gate against the CI baseline
+          cp target/release/foil /tmp/foil-new
+          git worktree add /tmp/base "$base"
+          (cd /tmp/base && cargo build --release && cp target/release/foil /tmp/foil-base)
+          sudo /tmp/foil-new setup
+          sudo /tmp/foil-base setup
+      - name: foilbench (base, this commit, base, this commit)
         run: |
-          if [ -f bench/baseline-ci.json ]; then
-            python3 bench/foilbench.py --gate bench/baseline-ci.json --tolerance 0.5 foilbench.json
-          else
-            echo "no bench/baseline-ci.json yet: commit this run's foilbench.json as the baseline"
-          fi
+          for round in 1 2; do
+            FOIL=/tmp/foil-base python3 bench/foilbench.py --quick --out base-$round.json
+            FOIL=/tmp/foil-new python3 bench/foilbench.py --quick --out foilbench-$round.json
+          done
+          cp foilbench-2.json foilbench.json
+      - name: Gate against the base
+        run: |
+          # A regression must show in both rounds to count (one noisy round is not one).
+          if python3 bench/foilbench.py --gate base-1.json --tolerance 0.5 foilbench-1.json; then exit 0; fi
+          python3 bench/foilbench.py --gate base-2.json --tolerance 0.5 foilbench-2.json
       - name: Show the numbers
         run: cat foilbench.json
       # Uploads can fail when the account's artifact quota is full; the
@@ -86,6 +101,26 @@ jobs:
           name: foilbench
           path: foilbench.json
           retention-days: 7
+
+  # macOS: APFS-clone branches and the Seatbelt sandbox (src/mac/), on
+  # Apple silicon and Intel.
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --all-targets
+      - name: Doctor
+        run: target/debug/foil doctor
 
   # The same suite inside a Docker container, with the settings from
   # contrib/docker/README.md.
@@ -138,3 +173,39 @@ jobs:
         run: |
           notes=$(awk -v v="${GITHUB_REF_NAME#v}" '$0 ~ "^## " v {on=1; next} /^## / {on=0} on' CHANGELOG.md)
           gh release create "$GITHUB_REF_NAME" dist/* --title "foil $GITHUB_REF_NAME" --notes "$notes"
+
+  # One macOS binary for Apple silicon and Intel (lipo), smoke-tested, and on
+  # a v* tag added to the release the Linux job created.
+  release-macos:
+    needs: [macos, release]
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - name: Universal binary
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          mkdir dist
+          lipo -create -output dist/foil-macos-universal \
+            target/aarch64-apple-darwin/release/foil target/x86_64-apple-darwin/release/foil
+          cd dist && shasum -a 256 foil-macos-universal > foil-macos-universal.sha256
+      - name: Smoke test the binary
+        run: |
+          dist/foil-macos-universal doctor
+          FOIL=$PWD/dist/foil-macos-universal sh examples/best-of-n/demo.sh
+      - uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: foil-macos-universal
+          path: dist/
+          retention-days: 7
+      - name: Add to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" dist/*

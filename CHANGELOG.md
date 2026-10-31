@@ -7,6 +7,27 @@
   comment on the first pull request.
 - Pull request and issue templates, and a code of conduct.
 
+## 0.4.0 — 2026-10-26
+
+macOS support.
+
+- Branches from APFS clones: a frozen `base` and the `tree` the command
+  works in; diff, conflicts and commit are exact three-way comparisons; commit
+  clones files back (no data copied), with the same crash-safe journal.
+- The sandbox from Seatbelt: `--protect`, `--no-network`, `--strict` (home
+  folders and other volumes hidden, a private home, clean environment, only
+  foil's proxy reachable, signals and process information only within the
+  run).
+- Every process of a run is found through its profile, detached ones too,
+  and stopped at the end; a SIGKILLed foil's leftovers are stopped before the
+  branch is used again.
+- The network proxy listens on a loopback port and requires a per-run token.
+- `--memory` as a watchdog and `--timeout`; `--cpus`/`--pids` stay Linux-only.
+- `foil vm`: Linux foil in a Lima VM sharing only the folders you name.
+- `foil doctor` checks each of these for real; `tests/mac.rs` (19 tests).
+- CI on macOS (Apple silicon and Intel); releases add a universal macOS
+  binary; `install.sh` and Homebrew install it.
+
 ## 0.3.0 — 2026-10-24
 
 First public release.

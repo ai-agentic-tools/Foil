@@ -1,3 +1,4 @@
+#![cfg(target_os = "linux")] // macOS: tests/mac.rs
 //! The escape suite for `--strict`: each `cannot_*` test tries something a
 //! strict run must not be able to do, and checks that it failed; the other
 //! tests check that strict runs still behave like ordinary runs.

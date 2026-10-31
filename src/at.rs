@@ -64,11 +64,45 @@ pub fn is_dir(st: &libc::stat) -> bool {
 
 /// The names in an open directory. Listed through `/proc/self/fd`, which
 /// names the directory itself, wherever it is now.
+#[cfg(target_os = "linux")]
 pub fn names(dir: RawFd) -> io::Result<Vec<CString>> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir(format!("/proc/self/fd/{dir}"))? {
         out.push(cname(&entry?.file_name())?);
     }
+    Ok(out)
+}
+
+/// The names in an open directory, read from a copy of its descriptor
+/// (macOS has no `/proc`).
+#[cfg(target_os = "macos")]
+pub fn names(dir: RawFd) -> io::Result<Vec<CString>> {
+    // SAFETY: dup of a valid descriptor; fdopendir takes ownership of the copy.
+    let copy = cvt(unsafe { libc::dup(dir) })?;
+    let stream = unsafe { libc::fdopendir(copy) };
+    if stream.is_null() {
+        let err = io::Error::last_os_error();
+        // SAFETY: fdopendir failed, so the copy is still ours.
+        unsafe { libc::close(copy) };
+        return Err(err);
+    }
+    // SAFETY: rewind, in case the original was read before (they share an offset).
+    unsafe { libc::rewinddir(stream) };
+    let mut out = Vec::new();
+    loop {
+        // SAFETY: a valid stream; readdir returns null at the end.
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            break;
+        }
+        // SAFETY: d_name is NUL-terminated.
+        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if name.to_bytes() != b"." && name.to_bytes() != b".." {
+            out.push(name.to_owned());
+        }
+    }
+    // SAFETY: closes the stream and the copied descriptor.
+    unsafe { libc::closedir(stream) };
     Ok(out)
 }
 
@@ -115,6 +149,15 @@ pub fn create_at(dir: RawFd, name: &CStr) -> io::Result<std::fs::File> {
     Ok(std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) }))
 }
 
+/// Open the existing file `name` inside `dir` for writing its metadata,
+/// refusing a symlink.
+pub fn open_file_at(dir: RawFd, name: &CStr) -> io::Result<std::fs::File> {
+    // SAFETY: valid descriptor and name; the result is checked.
+    let fd = cvt(unsafe { libc::openat(dir, name.as_ptr(), libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC) })?;
+    // SAFETY: a fresh descriptor we own.
+    Ok(std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) }))
+}
+
 pub fn symlink_at(target: &OsStr, dir: RawFd, name: &CStr) -> io::Result<()> {
     let t = cname(target)?;
     // SAFETY: valid strings and descriptor.
@@ -152,5 +195,10 @@ pub fn fchmod(fd: RawFd, mode: u32) -> io::Result<()> {
 /// Set the extended attribute `name` = `value` on an open file or folder.
 pub fn fsetxattr(fd: RawFd, name: &CStr, value: &[u8]) -> io::Result<()> {
     // SAFETY: valid descriptor and name; `value.len()` bytes are readable.
-    cvt(unsafe { libc::fsetxattr(fd, name.as_ptr(), value.as_ptr().cast(), value.len(), 0) }).map(drop)
+    #[cfg(target_os = "linux")]
+    let rc = unsafe { libc::fsetxattr(fd, name.as_ptr(), value.as_ptr().cast(), value.len(), 0) };
+    // macOS adds a position (resource forks only) and options.
+    #[cfg(target_os = "macos")]
+    let rc = unsafe { libc::fsetxattr(fd, name.as_ptr(), value.as_ptr().cast(), value.len(), 0, 0) };
+    cvt(rc).map(drop)
 }

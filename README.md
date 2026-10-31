@@ -8,7 +8,7 @@
 
 Run Claude Code, OpenAI Codex or any other agent or script in an instant
 copy-on-write branch of your project, then review the diff and commit it, or
-throw it away. No Docker, no root, no VM.
+throw it away. No Docker, no root, no VM. Linux and macOS.
 
 `foil` gives a coding agent an instant, private copy-on-write *branch* of your
 working folder. The agent edits, builds and tests freely; your real folder
@@ -36,8 +36,8 @@ foil diff --patch fix-login        # review exactly what changed
 foil commit fix-login              # apply it (or: foil abort fix-login)
 ```
 
-No root, no daemon, no container image, no copy: one static 2 MB binary on
-plain Linux.
+No root, no daemon, no container image, no copy: one 2 MB binary, on Linux
+and on macOS.
 
 ## Demo: three agents fix a real Django bug
 
@@ -105,7 +105,7 @@ grow with the workspace: nothing is copied until it is written.*
 | Hides `~/.ssh`, tokens, other repos | no | yes | yes | partly | **yes (`--strict`)** |
 | Network allow-list, key hidden from agent | no | add a proxy | varies | partly | **yes (`--allow-host`, `--inject-key`)** |
 | Needs | git | a daemon and an image | an account, a network | the agent | **one 2 MB binary** |
-| Kernel isolation | none | shared kernel | microVM or VM | shared kernel | shared kernel ([use a VM for hostile code](#what-foil-is-not)) |
+| Kernel isolation | none | shared kernel | microVM or VM | shared kernel | shared kernel ([`foil vm`](#macos) or a VM for hostile code) |
 
 Use a cloud microVM for code you don't trust at all. Use foil for the agents
 you run every day on your own projects, where the risk is a wrong or misled
@@ -161,8 +161,8 @@ agent, not an attacker with a kernel exploit.
 
 ## Install
 
-Linux, kernel 5.12 or newer (Ubuntu 22.04+, Debian 12+, Fedora 36+).
-Tested on x86_64; other architectures build from source but are untested.
+Linux, kernel 5.12 or newer (Ubuntu 22.04+, Debian 12+, Fedora 36+), x86_64;
+or macOS 12 or newer, Apple silicon or Intel (see [macOS](#macos)).
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ai-agentic-tools/foil/main/install.sh | sh
@@ -309,6 +309,34 @@ foil is a guard rail, not a security boundary against a determined attacker.
   slower for big folders, and it fails half-way on a folder whose owner
   removed their own search (`x`) permission. Files rename normally.
 
+## macOS
+
+The same commands work on a Mac, built from what macOS has instead of
+namespaces, overlayfs and cgroups:
+
+| | Linux | macOS |
+|---|---|---|
+| Branch | overlayfs over the workspace's own path, ~25 ms at any size | two APFS clones (`base`, `tree`): ~0.65 s to create for 10 000 files (Intel Mac), ~70 ms per later run; the command works in the clone's path |
+| diff, conflicts | the overlay's upper layer; change times | exact three-way comparison against `base` (~0.2 s for 10 000 files) |
+| `--protect`, `--strict`, `--no-network` | mount, PID, IPC and network namespaces | a Seatbelt profile (the sandbox Chrome, Codex and Claude Code use) |
+| Cleanup | a cgroup per run | every process carries the run's profile, so even detached ones are found and stopped |
+| Limits | `--memory`, `--cpus`, `--pids` | `--memory` as a watchdog; `--timeout` |
+
+Weaker than Linux: a strict run can still see that other processes exist
+and reach macOS system services; tools that wrote absolute paths into the
+repository (a virtualenv inside it) point at the real folder, which a branch
+run may not write; and Seatbelt sandboxes don't nest, so foil can't start
+from inside another sandbox (turn off an agent's own sandbox inside foil).
+For code you don't trust at all, `foil vm` runs Linux foil, with every Linux
+guarantee, in a small Linux VM ([Lima](https://lima-vm.io)) that shares only
+the folders you name:
+
+```sh
+foil vm setup ~/src/app          # once: create the VM, install foil in it
+cd ~/src/app && foil vm run -b try --strict -- make test
+foil vm diff try && foil vm commit try
+```
+
 ## How it works
 
 `foil run` forks the command into a fresh cgroup and, before it starts, into
@@ -348,7 +376,7 @@ protects nothing outside itself. A foil branch is the whole folder as it is,
 in about 25 ms, with the rest of the machine out of reach.
 
 **Do I need Docker, root or a daemon?** No. foil uses Linux user namespaces
-and overlayfs as your own user. On Ubuntu 23.10 or newer, `sudo foil setup`
+and overlayfs (on macOS, APFS clones and Seatbelt) as your own user. On Ubuntu 23.10 or newer, `sudo foil setup`
 once allows user namespaces for the foil binary.
 
 **Is it a security boundary?** Against a buggy, careless or prompt-injected
@@ -357,7 +385,8 @@ agent, yes: that is what it is built and tested for
 exploit, no: run hostile code in a VM. See [SECURITY.md](SECURITY.md).
 
 **Which systems are supported?** Linux 5.12 or newer (Ubuntu 22.04+,
-Debian 12+, Fedora 36+). Windows: in a Linux VM.
+Debian 12+, Fedora 36+) and macOS 12 or newer, Apple silicon or Intel
+([macOS](#macos) lists what differs). Windows: in a Linux VM.
 
 ## Development
 

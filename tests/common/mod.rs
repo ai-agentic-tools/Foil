@@ -152,7 +152,10 @@ fn xattrs(path: &Path) -> Vec<(Vec<u8>, Vec<u8>)> {
     let c = CString::new(path.as_os_str().as_bytes()).unwrap();
     let mut names = vec![0u8; 4096];
     // SAFETY: valid path; buffer length passed.
+    #[cfg(target_os = "linux")]
     let n = unsafe { libc::llistxattr(c.as_ptr(), names.as_mut_ptr().cast(), names.len()) };
+    #[cfg(target_os = "macos")]
+    let n = unsafe { libc::listxattr(c.as_ptr(), names.as_mut_ptr().cast(), names.len(), libc::XATTR_NOFOLLOW) };
     if n <= 0 {
         return Vec::new();
     }
@@ -161,13 +164,30 @@ fn xattrs(path: &Path) -> Vec<(Vec<u8>, Vec<u8>)> {
         let cname = CString::new(name).unwrap();
         let mut value = vec![0u8; 65536];
         // SAFETY: valid path and name; buffer length passed.
+        #[cfg(target_os = "linux")]
         let len = unsafe { libc::lgetxattr(c.as_ptr(), cname.as_ptr(), value.as_mut_ptr().cast(), value.len()) };
+        #[cfg(target_os = "macos")]
+        let len = unsafe {
+            libc::getxattr(c.as_ptr(), cname.as_ptr(), value.as_mut_ptr().cast(), value.len(), 0, libc::XATTR_NOFOLLOW)
+        };
         if len >= 0 {
             out.push((name.to_vec(), value[..len as usize].to_vec()));
         }
     }
     out.sort();
     out
+}
+
+/// A shell command that sets extended attribute `name` = `value` on `path`
+/// (Python's os.setxattr on Linux; the `xattr` tool on macOS, whose Python
+/// has no setxattr).
+pub fn setx(path: &str, name: &str, value: &str) -> String {
+    if cfg!(target_os = "macos") {
+        // The tool opens what it is given: on a FIFO it would wait forever.
+        format!("{{ [ -p {path} ] || xattr -w {name} {value} {path}; }}")
+    } else {
+        format!("python3 -c \"import os,sys; os.setxattr(sys.argv[1], '{name}', b'{value}')\" {path}")
+    }
 }
 
 /// The paths where two snapshots differ, for failure messages.

@@ -30,7 +30,7 @@ use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::SystemTime;
 
 use crate::at;
@@ -46,35 +46,7 @@ pub struct Branch {
     dir: PathBuf,
 }
 
-/// One change a branch makes to its workspace, as `foil diff` shows it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Change {
-    pub kind: ChangeKind,
-    /// Relative to the workspace.
-    pub path: PathBuf,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChangeKind {
-    Added,
-    Modified,
-    Deleted,
-    /// Deleted and created again as a directory, or replaced by something
-    /// of another type (a directory by a file, a file by a directory): only
-    /// the new contents count.
-    Replaced,
-}
-
-impl ChangeKind {
-    pub fn letter(self) -> char {
-        match self {
-            ChangeKind::Added => 'A',
-            ChangeKind::Modified => 'M',
-            ChangeKind::Deleted => 'D',
-            ChangeKind::Replaced => 'R',
-        }
-    }
-}
+pub use crate::change::{Change, ChangeKind};
 
 /// Where branches are stored: `$FOIL_HOME`, else `$XDG_DATA_HOME/foil`,
 /// else `~/.local/share/foil`.
@@ -227,69 +199,10 @@ impl Branch {
         Ok((kept, hidden))
     }
 
-    /// Which of `changes` git ignores in the workspace (asked in one
-    /// `git check-ignore` call). Empty if git is missing or this is not a
-    /// repository. Files git tracks are never reported, even if a pattern
-    /// matches them.
+    /// Which of `changes` git ignores in the workspace (see `gitignore.rs`).
     fn ignored(&self, changes: &[Change]) -> HashSet<PathBuf> {
-        // A workspace that is itself ignored by an enclosing repository (a
-        // scratch folder under `target/`, say) is not a project of that
-        // repository: its rules would drop every change.
-        if self.workspace_is_ignored() {
-            return HashSet::new();
-        }
-        let mut input = Vec::new();
-        for change in changes {
-            input.extend_from_slice(change.path.as_os_str().as_bytes());
-            // A trailing slash lets directory-only patterns like `build/`
-            // match a directory that exists only in the branch.
-            if self.upper().join(&change.path).symlink_metadata().is_ok_and(|m| m.is_dir()) {
-                input.push(b'/');
-            }
-            input.push(0);
-        }
-        let child = Command::new("git")
-            .arg("-C")
-            .arg(&self.workspace)
-            .args(["check-ignore", "-z", "--stdin"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn();
-        let Ok(mut child) = child else { return HashSet::new() };
-        // Feed stdin from another thread: git answers while we still write,
-        // and two full pipes would wait on each other forever.
-        let mut stdin = child.stdin.take().expect("piped");
-        let writer = std::thread::spawn(move || stdin.write_all(&input));
-        let output = child.wait_with_output();
-        let _ = writer.join();
-        // Exit 0: some paths are ignored; 1: none; 128: not a repository.
-        let output = match output {
-            Ok(output) if output.status.code() == Some(0) => output,
-            _ => return HashSet::new(),
-        };
-        output
-            .stdout
-            .split(|&b| b == 0)
-            .filter(|p| !p.is_empty())
-            .map(|p| PathBuf::from(OsStr::from_bytes(p.strip_suffix(b"/").unwrap_or(p))))
-            .collect()
-    }
-
-    /// Whether git ignores the workspace folder itself.
-    fn workspace_is_ignored(&self) -> bool {
-        let (Some(parent), Some(name)) = (self.workspace.parent(), self.workspace.file_name()) else {
-            return false;
-        };
-        Command::new("git")
-            .arg("-C")
-            .arg(parent)
-            .args(["check-ignore", "-q", "--"])
-            .arg(name)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
+        let upper = self.upper();
+        crate::gitignore::ignored(&self.workspace, changes, |p| upper.join(p).symlink_metadata().is_ok_and(|m| m.is_dir()))
     }
 
     /// Every change this branch would make to its workspace, in path order.

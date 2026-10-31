@@ -78,7 +78,7 @@ fn operation(rng: &mut Rng) -> String {
         // own test in resilience.rs.
         11 => format!("chmod {m} {p} && {{ [ ! -d {p} ] || chmod u+x {p}; }}", m = rng.pick(&["644", "755", "600", "444", "700", "555"])),
         12 => format!("mkfifo {p}"),
-        13 => format!("python3 -c \"import os,sys; os.setxattr(sys.argv[1], 'user.k', b'{n}')\" {p}"),
+        13 => common::setx(&p, "user.k", &n.to_string()),
         14 => format!("rm -rf {p} && mkdir -p {p} && printf 'in{n}' > {p}/inner"),
         _ => format!("cp -a {p} {q}"),
     };
@@ -108,7 +108,7 @@ fn operation_kind(rng: &mut Rng, kinds: &[usize]) -> String {
             5 => op.contains("mkdir -p") && !op.contains("rm -rf"),
             9 => op.contains("ln -s"),
             11 => op.contains("chmod 6") || op.contains("chmod 7"),
-            13 => op.contains("setxattr"),
+            13 => op.contains("setxattr") || op.contains("xattr -w"),
             _ => false,
         };
         if ok {

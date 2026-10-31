@@ -19,6 +19,9 @@ OpenSandbox compatibility.
   OpenSandbox's server (with OSEP-0025, a draft proposal).
 - `install.sh`: `FOIL_VERSION` picks a release; `FOIL_NO_SETUP=1` and
   containers skip the AppArmor setup.
+- Licensed under Apache-2.0 alone (was MIT OR Apache-2.0; 0.3.0 and earlier
+  keep their license). Contributions need the [CLA](CLA.md), signed once by
+  comment on the first pull request.
 - Pull request and issue templates, and a code of conduct.
 
 ## 0.4.0 — 2026-10-26

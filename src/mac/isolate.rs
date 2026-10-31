@@ -46,6 +46,8 @@ pub struct Options {
     pub proxy_dir: Option<PathBuf>,
     /// The loopback port of foil's proxy, the only address a strict run may reach.
     pub proxy_port: Option<u16>,
+    /// Unix sockets the run may create and listen on (`foil serve`'s execd).
+    pub listen: Vec<PathBuf>,
 }
 
 /// Variables a strict run keeps from foil's environment.
@@ -232,6 +234,14 @@ impl Plan {
                 p.push_str("(allow network-outbound (remote ip \"localhost:*\"))\n(allow network-outbound (remote unix-socket))\n");
                 p.push_str("(deny network-outbound (remote unix-socket (path-literal \"/private/var/run/mDNSResponder\")))\n");
             }
+        }
+
+        // Last, so these win over the denials above: the sockets the run may listen on.
+        for socket in &options.listen {
+            p.push_str(&format!(
+                "(allow file-write* (literal {q}))\n(allow network-bind network-inbound (local unix-socket (path-literal {q})))\n",
+                q = quote(socket)
+            ));
         }
 
         let env = if options.strict {

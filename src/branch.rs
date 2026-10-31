@@ -177,6 +177,15 @@ impl Branch {
         fs::write(self.dir.join("box"), dir.as_os_str().as_bytes())
     }
 
+    /// Freeze (or thaw) every process of the run using this branch, through
+    /// its cgroup box: frozen processes keep their memory but get no CPU.
+    pub fn freeze(&self, frozen: bool) -> io::Result<()> {
+        let raw = fs::read(self.dir.join("box")).map_err(|_| io::Error::other(format!("branch {} has no running box to pause", self.name)))?;
+        let freeze = Path::new(OsStr::from_bytes(&raw)).join("cgroup.freeze");
+        fs::write(&freeze, if frozen { "1" } else { "0" })
+            .map_err(|err| io::Error::new(err.kind(), format!("can't pause branch {} ({}): {err}", self.name, freeze.display())))
+    }
+
     /// When the branch was created; a workspace path changed after this may
     /// conflict with the branch's own change to it.
     fn created(&self) -> io::Result<SystemTime> {

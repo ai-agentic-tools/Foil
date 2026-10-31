@@ -1,0 +1,807 @@
+diff --git a/oseps/0025-foil-runtime.md b/oseps/0025-foil-runtime.md
+new file mode 100644
+index 0000000..fbdf79c
+--- /dev/null
++++ b/oseps/0025-foil-runtime.md
+@@ -0,0 +1,190 @@
++---
++title: Foil Runtime (Copy-on-Write Folder Sandboxes)
++authors:
++  - "@umbarsariya"
++creation-date: 2026-10-27
++last-updated: 2026-10-27
++status: draft
++---
++
++# OSEP-0025: Foil Runtime (Copy-on-Write Folder Sandboxes)
++
++<!-- toc -->
++- [Summary](#summary)
++- [Motivation](#motivation)
++  - [Goals](#goals)
++  - [Non-Goals](#non-goals)
++- [Requirements](#requirements)
++- [Proposal](#proposal)
++  - [Notes/Constraints/Caveats](#notesconstraintscaveats)
++  - [Risks and Mitigations](#risks-and-mitigations)
++- [Design Details](#design-details)
++- [Test Plan](#test-plan)
++- [Drawbacks](#drawbacks)
++- [Alternatives](#alternatives)
++- [Infrastructure Needed](#infrastructure-needed)
++- [Upgrade & Migration Strategy](#upgrade--migration-strategy)
++<!-- /toc -->
++
++## Summary
++
++Add a third runtime, `runtime.type = "foil"`, whose sandboxes are copy-on-write
++branches of a folder on the host, made by [foil](https://github.com/ai-agentic-tools/foil)
++(MIT OR Apache-2.0). A sandbox starts in about 25 ms on Linux without Docker,
++runs on Linux and macOS laptops, and what it changed can be reviewed and
++applied to the real folder. Every OpenSandbox client (SDKs, CLI, MCP) works
++unchanged: `foil serve` implements the lifecycle API and an execd-compatible
++API inside each sandbox, and the new `FoilSandboxService` forwards to it.
++
++## Motivation
++
++The most common sandbox job for coding agents is "work on this repository".
++Today that means building or pulling an image, copying the repository into a
++container, and copying results back out. Locally it needs Docker; on macOS it
++needs a Linux VM. Nothing tells the caller which files the agent changed, and
++nothing checks, when results go back, whether someone changed the same files
++meanwhile.
++
++OSEP-0013 brings copy-on-write *inside* a sandbox (bwrap overlay, `diff`,
++`commit` with `overwrite`). A foil runtime makes the sandbox itself the
++copy-on-write layer, over the real folder, and adds what OSEP-0013 lists as
++v2: conflict-refusing commit, per-sandbox cgroup limits, and crash-safe
++application of the changes.
++
++### Goals
++
++- `runtime.type = "foil"`: create, get, list, delete, pause, resume, renew,
++  patch metadata and get endpoints, through the existing lifecycle API.
++- Unmodified SDKs: `Sandbox.create(...)`, `commands.run`, sessions,
++  background commands, files and metrics work as with Docker.
++- Sandbox start, until execd answers, without an image pull. Measured
++  (median of 10, `integrations/opensandbox/bench.py` in foil): Linux 25 ms
++  (35 ms with `--strict`) for a folder of 10,000 files, independent of its
++  size; macOS (APFS clones, so it grows with the file count) 30 ms for a
++  small folder, 0.8 s for 10,000 files. A first command takes 10-18 ms.
++- Review and apply: the changes of a sandbox as a list or a patch, and a
++  commit to the real folder that refuses files changed there since the
++  sandbox started (unless forced).
++- Isolation per sandbox from foil's `--strict` mode where the operator asks
++  for it: deny-by-default filesystem view, PID/IPC namespaces, no network but
++  an allowlist proxy (`networkPolicy` with `defaultAction: deny` maps to it).
++
++### Non-Goals
++
++- Images. A foil sandbox is a view of a host folder; `image.uri` is recorded,
++  not run. Use Docker or Kubernetes for image-defined environments.
++- A security boundary for hostile code on a shared host. Foil shares the
++  host kernel (namespaces on Linux, Seatbelt on macOS). For hostile code run
++  foil in a microVM, or use the existing secure runtimes.
++- Snapshots (OSEP-0008/0015); `snapshotId` and `volumes` are refused.
++
++## Requirements
++
++- No change to the lifecycle or execd specs; no change to SDKs.
++- The runtime is optional: no new dependency for Docker/Kubernetes users.
++- Unsupported requests fail loudly (400), never silently: `volumes`,
++  `snapshotId`, `credentialProxy`, and network policies foil can't enforce
++  (CIDR targets, deny rules under allow-by-default).
++- Credentials never enter a sandbox: the server's key and each sandbox's
++  execd token are checked by `foil serve`, outside the sandbox.
++
++## Proposal
++
++```text
++SDK / CLI / MCP
++   │  lifecycle API                     execd API (direct, or via server proxy)
++   ▼                                        │
++OpenSandbox server ── FoilSandboxService ── ▼ ─────────────┐
++                        │ HTTP (same lifecycle API)         │
++                        ▼                                   ▼
++                  foil serve  ── /v1/sandboxes/{id}/proxy/44772/... ──► Unix socket
++                        │                                            ┌──────────────┐
++                        └─ foil run -b osb-<id> [--strict ...] ──────► foil __execd  │
++                           (one long-lived run per sandbox)          │ commands,    │
++                                                                     │ files, ...   │
++                                                                     └──────────────┘
++                                                                    branch of the folder
++```
++
++- `foil serve -w DIR [foil run options]` serves the lifecycle API. Each
++  sandbox is a branch of `DIR` with one long-lived `foil run` whose command
++  is foil's execd: everything execd starts is inside the branch and the
++  sandbox. `foil serve` relays execd's API from
++  `/v1/sandboxes/{id}/proxy/44772/` to the daemon's Unix socket.
++- `FoilSandboxService` (in this repository, ~250 lines) forwards each
++  `SandboxService` call to `foil serve` and converts the JSON to the
++  server's models. `get_endpoint` returns `foil serve`'s relay address and
++  the sandbox's `X-EXECD-ACCESS-TOKEN` header; the server's own proxy mode
++  works as for other runtimes.
++- Review and apply are `foil serve` endpoints (`GET .../diff`,
++  `POST .../commit`); the service exposes them as `get_diff` / `commit`.
++  A follow-up could add them to the lifecycle spec for every runtime that
++  can support them.
++
++### Notes/Constraints/Caveats
++
++- Paths: on Linux a sandbox sees the folder at its real path; on macOS a
++  branch is a folder of its own, and foil's execd maps the folder's path to
++  it in file APIs (commands see the branch path).
++- `resourceLimits` from the request are not applied; the operator sets
++  limits for all sandboxes with `foil serve --memory/--cpus/--pids`.
++- `uid`/`gid` other than the server user's are refused (foil is unprivileged).
++- Sandboxes outlive `foil serve` restarts: runs are recorded and adopted.
++
++### Risks and Mitigations
++
++| Risk | Mitigation |
++|------|------------|
++| Shared kernel | Documented non-goal; `--strict` by default for untrusted agents; microVM for hostile code |
++| A sandbox reaching another sandbox's execd | Per-sandbox socket folder; a strict view shows only its own; tested |
++| Server key leaking into sandboxes | Removed from the environment of every run; tested |
++| Commit clobbering concurrent edits | Commit refuses files changed since the branch was made (ctime), unless forced; crash-safe journal |
++
++## Design Details
++
++- Config: `[foil] url, api_key | api_key_env, workspace, endpoint_host,
++  timeout_seconds`; `runtime.type` gains `"foil"`. The snapshot runtime for
++  `foil` is the no-op runtime.
++- Errors from `foil serve` keep their HTTP status, with codes prefixed
++  `FOIL::`; an unreachable `foil serve` is a 503.
++- Diagnostics: logs scope `run` (the sandbox's foil run output), events
++  scope `runtime` (state transitions).
++- execd compatibility in foil: `/ping`, `/command` (foreground SSE,
++  background with status, byte-cursor logs, interrupt), `/session`,
++  `/files/*`, `/directories/*`, `/metrics`. `/code`, `/pty` and
++  `/v1/isolated/*` answer 501 / `available: false`.
++
++## Test Plan
++
++- `server/tests/test_foil_service.py`: the service against a mocked
++  `foil serve` (request mapping, errors, endpoints), and against a real one
++  when `FOIL_BIN` is set (create, command, diff, commit).
++- foil's CI runs the unmodified Python SDK end to end against `foil serve`
++  (Linux and macOS, plain and `--strict`), and this server's foil tests.
++- Manually verified: the SDK through this server with `runtime.type =
++  "foil"`, direct and `use_server_proxy`.
++
++## Drawbacks
++
++- A runtime whose sandboxes don't come from images may surprise users who
++  expect `image` to matter; the runtime records it and documents this.
++- An external binary (`foil`) to install and keep running next to the server.
++
++## Alternatives
++
++- foil inside Docker sandboxes (works today with
++  `bootstrap.execd.isolation=enable`; see foil's
++  `integrations/opensandbox/inside`): many attempts in one sandbox, but still
++  a container per sandbox.
++- Client-side only (`foil serve` without this server): already possible,
++  but loses the server's auth, tenancy and tooling.
++
++## Infrastructure Needed
++
++None. CI needs the foil binary for the real-server test (downloadable
++release, or skipped).
++
++## Upgrade & Migration Strategy
++
++Additive: a new runtime type and config block; existing configurations are
++unaffected.
+diff --git a/oseps/README.md b/oseps/README.md
+index 642cfc8..811abea 100644
+--- a/oseps/README.md
++++ b/oseps/README.md
+@@ -30,3 +30,4 @@ This is the complete list of OpenSandbox Enhancement Proposals:
+ | [OSEP-0022](0022-multi-sandbox-egress-control-plane.md)        |      Multi-Sandbox Egress Control Plane                                  | implementing  |  2026-08-21  |
+ | [OSEP-0023](0023-credential-bound-tls-interception.md)          |      Credential-Bound TLS Interception                                    | implementing  |  2026-09-09  |
+ | [OSEP-0024](0024-auto-pause-and-wake-on-access-for-fast-sandbox.md) |      Auto-Pause and Wake-on-Access for Fast Sandbox                  | implementing  |  2026-10-12  |
++| [OSEP-0025](0025-foil-runtime.md)                               |      Foil Runtime (Copy-on-Write Folder Sandboxes)                       |     draft     |  2026-10-27  |
+diff --git a/server/configuration.md b/server/configuration.md
+index fa73ec8..5c3ea4f 100644
+--- a/server/configuration.md
++++ b/server/configuration.md
+@@ -16,6 +16,7 @@ Example files: [`example.config.toml`](opensandbox_server/examples/example.confi
+ 4. [`[log]`](#log)
+ 5. [`[runtime]`](#runtime--required)
+ 6. [`[docker]`](#docker--only-when-runtime--docker)
++   - [`[foil]`](#foil--only-when-runtime--foil)
+ 7. [`[kubernetes]`](#kubernetes--only-when-runtime--kubernetes)
+ 8. [`[agent_sandbox]`](#agent_sandbox--only-with-kubernetes--agent-sandbox)
+ 9. [`[ingress]`](#ingress)
+@@ -97,8 +98,8 @@ Example files: [`example.config.toml`](opensandbox_server/examples/example.confi
+ 
+ | Key | Type | Default | Description |
+ |-----|------|---------|-------------|
+-| `type` | string | — | **`docker`** or **`kubernetes`**. |
+-| `execd_image` | string | — | OCI image containing the **execd** binary (in-sandbox bootstrap). |
++| `type` | string | — | **`docker`**, **`kubernetes`** or **`foil`**. |
++| `execd_image` | string | — | OCI image containing the **execd** binary (in-sandbox bootstrap). Unused by `foil` (any non-empty value). |
+ | `execd_run_as_init` | boolean | `false` | Run execd as sandbox init (OSEP-0018): execd becomes PID 1 (child reaping, container lifecycle, hardening floor). |
+ 
+ ---
+@@ -122,6 +123,35 @@ Example files: [`example.config.toml`](opensandbox_server/examples/example.confi
+ 
+ ---
+ 
++## `[foil]` — only when `runtime.type = "foil"`
++
++Sandboxes are copy-on-write branches of a host folder, served by
++[`foil serve`](https://github.com/ai-agentic-tools/foil/tree/main/integrations/opensandbox):
++no Docker, millisecond starts, Linux and macOS, and a sandbox's changes can
++be reviewed and applied to the real folder. `foil serve` runs execd's API in
++each sandbox; images are not used (`image.uri` is recorded only).
++
++| Key | Type | Default | Description |
++|-----|------|---------|-------------|
++| `url` | string | `"http://127.0.0.1:8090"` | Base URL of `foil serve`. |
++| `api_key` | string \| omitted | `null` | The key `foil serve` expects (its `OPEN_SANDBOX_API_KEY`). |
++| `api_key_env` | string | `"FOIL_SERVE_API_KEY"` | Environment variable read when `api_key` is unset. |
++| `workspace` | string \| omitted | `null` | Folder new sandboxes branch (one of `foil serve -w`); default: the first served. |
++| `endpoint_host` | string \| omitted | `null` | `host:port` clients use to reach `foil serve` directly, when not `url`'s. |
++| `timeout_seconds` | number | `60` | Timeout for calls to `foil serve`. |
++
++```toml
++[runtime]
++type = "foil"
++execd_image = "unused-by-foil"
++
++[foil]
++url = "http://127.0.0.1:8090"   # foil serve --listen 127.0.0.1:8090 -w ~/project --strict
++api_key_env = "FOIL_SERVE_API_KEY"
++```
++
++---
++
+ ## `[kubernetes]` — only when `runtime.type = "kubernetes"`
+ 
+ Missing table → defaults from `KubernetesRuntimeConfig`.
+diff --git a/server/opensandbox_server/config.py b/server/opensandbox_server/config.py
+index 24bb6b0..9e556b4 100644
+--- a/server/opensandbox_server/config.py
++++ b/server/opensandbox_server/config.py
+@@ -1229,8 +1229,25 @@ class EgressConfig(BaseModel):
+         return self
+ 
+ 
++class FoilConfig(BaseModel):
++    """`foil serve` backend for runtime.type = "foil"."""
++
++    url: str = Field(default="http://127.0.0.1:8090", description="Base URL of the `foil serve` instance.")
++    api_key: Optional[str] = Field(default=None, description="The key `foil serve` expects (OPEN_SANDBOX_API_KEY there).")
++    api_key_env: str = Field(default="FOIL_SERVE_API_KEY", description="Environment variable holding the key when api_key is unset.")
++    workspace: Optional[str] = Field(
++        default=None,
++        description="Folder new sandboxes branch (one `foil serve -w` serves); defaults to the first one served.",
++    )
++    endpoint_host: Optional[str] = Field(
++        default=None,
++        description="host:port clients use to reach `foil serve` directly, when it differs from url.",
++    )
++    timeout_seconds: float = Field(default=60.0, gt=0, description="Timeout for calls to `foil serve`.")
++
++
+ class RuntimeConfig(BaseModel):
+-    type: Literal["docker", "kubernetes"] = Field(
++    type: Literal["docker", "kubernetes", "foil"] = Field(
+         ...,
+         description="Active sandbox runtime implementation.",
+     )
+@@ -1602,6 +1619,7 @@ class AppConfig(BaseModel):
+         description="OpenTelemetry export for SDK metrics ingestion (Phase 1: create latency).",
+     )
+     runtime: RuntimeConfig = Field(..., description="Sandbox runtime configuration.")
++    foil: Optional[FoilConfig] = None
+     kubernetes: Optional[KubernetesRuntimeConfig] = None
+     agent_sandbox: Optional["AgentSandboxRuntimeConfig"] = None
+     ingress: Optional[IngressConfig] = None
+@@ -1638,6 +1656,11 @@ class AppConfig(BaseModel):
+                 raise ValueError(
+                     "agent_sandbox block requires kubernetes.workload_provider = 'agent-sandbox'."
+                 )
++        elif self.runtime.type == "foil":
++            if self.kubernetes is not None or self.agent_sandbox is not None:
++                raise ValueError("kubernetes/agent_sandbox blocks must be omitted when runtime.type = 'foil'.")
++            if self.foil is None:
++                self.foil = FoilConfig()
+         else:
+             raise ValueError(f"Unsupported runtime type '{self.runtime.type}'.")
+         upstream_proxy = self.egress.upstream_proxy if self.egress else None
+diff --git a/server/opensandbox_server/services/factory.py b/server/opensandbox_server/services/factory.py
+index 4b767d6..4d54450 100644
+--- a/server/opensandbox_server/services/factory.py
++++ b/server/opensandbox_server/services/factory.py
+@@ -26,6 +26,7 @@ from opensandbox_server.config import AppConfig, get_config
+ from opensandbox_server.services.docker import DockerSandboxService
+ from opensandbox_server.services.k8s import KubernetesSandboxService
+ from opensandbox_server.services.fast_sandbox import FastSandboxService
++from opensandbox_server.services.foil import FoilSandboxService
+ from opensandbox_server.services.sandbox_service import SandboxService
+ from opensandbox_server.services.composite_service import CompositeSandboxService
+ 
+@@ -59,6 +60,7 @@ def create_sandbox_service(
+     implementations = {
+         "docker": DockerSandboxService,
+         "kubernetes": KubernetesSandboxService,
++        "foil": FoilSandboxService,
+     }
+ 
+     if selected_type not in implementations:
+diff --git a/server/opensandbox_server/services/foil/__init__.py b/server/opensandbox_server/services/foil/__init__.py
+new file mode 100644
+index 0000000..27e38dd
+--- /dev/null
++++ b/server/opensandbox_server/services/foil/__init__.py
+@@ -0,0 +1,17 @@
++# Copyright 2026 The OpenSandbox Authors
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++from opensandbox_server.services.foil.service import FoilSandboxService
++
++__all__ = ["FoilSandboxService"]
+diff --git a/server/opensandbox_server/services/foil/service.py b/server/opensandbox_server/services/foil/service.py
+new file mode 100644
+index 0000000..7751744
+--- /dev/null
++++ b/server/opensandbox_server/services/foil/service.py
+@@ -0,0 +1,209 @@
++# Copyright 2026 The OpenSandbox Authors
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++"""
++Foil runtime: sandboxes as copy-on-write branches of a host folder.
++
++`foil serve` (https://github.com/ai-agentic-tools/foil) implements the lifecycle
++API itself and runs an execd-compatible daemon in every sandbox. This service
++forwards the lifecycle calls to it, so OpenSandbox's server, auth, tenancy
++and tooling front sandboxes that start in milliseconds without Docker, work
++on Linux and macOS laptops, and whose changes can be reviewed and applied to
++the real folder (`foil.diff` / `foil.commit` below).
++"""
++
++from __future__ import annotations
++
++import logging
++import os
++from typing import Any, Optional
++
++import httpx
++from fastapi import HTTPException
++
++from opensandbox_server.api.schema import (
++    CreateSandboxRequest,
++    CreateSandboxResponse,
++    Endpoint,
++    ListSandboxesRequest,
++    ListSandboxesResponse,
++    PatchSandboxMetadataRequest,
++    RenewSandboxExpirationRequest,
++    RenewSandboxExpirationResponse,
++    Sandbox,
++)
++from opensandbox_server.config import AppConfig, FoilConfig, get_config
++from opensandbox_server.services.diagnostics import (
++    DiagnosticContext,
++    DiagnosticResult,
++    limit_diagnostic_lines,
++    unsupported_scope_error,
++)
++from opensandbox_server.services.extension_service import ExtensionService
++from opensandbox_server.services.sandbox_service import SandboxService
++
++logger = logging.getLogger(__name__)
++
++_SUPPORTED_LOG_SCOPES = ("run", "all")
++_SUPPORTED_EVENT_SCOPES = ("runtime", "all")
++_LOG_LINE_LIMIT = 100
++
++
++class FoilSandboxService(SandboxService, ExtensionService):
++    """Sandbox lifecycle on a `foil serve` instance."""
++
++    def __init__(self, config: Optional[AppConfig] = None, client: Optional[httpx.Client] = None):
++        self.app_config = config or get_config()
++        self.foil: FoilConfig = self.app_config.foil or FoilConfig()
++        key = self.foil.api_key or os.environ.get(self.foil.api_key_env, "")
++        if not key:
++            raise ValueError(f"[foil] needs api_key, or the key of `foil serve` in ${self.foil.api_key_env}")
++        self._client = client or httpx.Client(
++            base_url=self.foil.url.rstrip("/") + "/v1",
++            headers={"OPEN-SANDBOX-API-KEY": key},
++            timeout=self.foil.timeout_seconds,
++        )
++
++    def close(self) -> None:
++        self._client.close()
++
++    # ---- plumbing ----
++
++    def _call(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
++        try:
++            response = self._client.request(method, path, **kwargs)
++        except httpx.HTTPError as exc:
++            raise HTTPException(
++                status_code=503,
++                detail={"code": "FOIL::UNREACHABLE", "message": f"foil serve at {self.foil.url}: {exc}"},
++            ) from exc
++        if response.status_code >= 400:
++            try:
++                body = response.json()
++                detail = {"code": f"FOIL::{body.get('code', 'ERROR')}", "message": body.get("message", response.text)}
++            except ValueError:
++                detail = {"code": "FOIL::ERROR", "message": response.text}
++            raise HTTPException(status_code=response.status_code, detail=detail)
++        return response
++
++    # ---- lifecycle ----
++
++    async def create_sandbox(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
++        body = request.model_dump(by_alias=True, exclude_none=True, mode="json")
++        if self.foil.workspace and "foil.workspace" not in (body.get("extensions") or {}):
++            body.setdefault("extensions", {})["foil.workspace"] = self.foil.workspace
++        response = self._call("POST", "/sandboxes", json=body)
++        return CreateSandboxResponse.model_validate(response.json())
++
++    def list_sandboxes(self, request: ListSandboxesRequest) -> ListSandboxesResponse:
++        params: list[tuple[str, str]] = [("state", s) for s in (request.filter.state or [])]
++        if request.filter.metadata:
++            params.append(("metadata", str(httpx.QueryParams(request.filter.metadata))))
++        if request.pagination:
++            params += [("page", str(request.pagination.page)), ("pageSize", str(request.pagination.page_size))]
++        response = self._call("GET", "/sandboxes", params=params)
++        return ListSandboxesResponse.model_validate(response.json())
++
++    def get_sandbox(self, sandbox_id: str) -> Sandbox:
++        return Sandbox.model_validate(self._call("GET", f"/sandboxes/{sandbox_id}").json())
++
++    def delete_sandbox(self, sandbox_id: str) -> None:
++        self._call("DELETE", f"/sandboxes/{sandbox_id}")
++
++    def pause_sandbox(self, sandbox_id: str) -> None:
++        self._call("POST", f"/sandboxes/{sandbox_id}/pause")
++
++    def resume_sandbox(self, sandbox_id: str) -> None:
++        self._call("POST", f"/sandboxes/{sandbox_id}/resume")
++
++    def renew_expiration(
++        self, sandbox_id: str, request: RenewSandboxExpirationRequest
++    ) -> RenewSandboxExpirationResponse:
++        body = request.model_dump(by_alias=True, mode="json")
++        response = self._call("POST", f"/sandboxes/{sandbox_id}/renew-expiration", json=body)
++        return RenewSandboxExpirationResponse.model_validate(response.json())
++
++    def patch_sandbox_metadata(self, sandbox_id: str, patch: PatchSandboxMetadataRequest) -> Sandbox:
++        response = self._call("PATCH", f"/sandboxes/{sandbox_id}/metadata", json=dict(patch))
++        return Sandbox.model_validate(response.json())
++
++    def get_endpoint(
++        self,
++        sandbox_id: str,
++        port: int,
++        resolve_internal: bool = False,
++        expires: Optional[int] = None,
++        use_proxy_host: bool = False,
++    ) -> Endpoint:
++        self.validate_port(port)
++        if expires is not None:
++            raise HTTPException(
++                status_code=400,
++                detail={"code": "FOIL::SIGNED_ROUTES_UNSUPPORTED", "message": "the foil runtime has no signed routes"},
++            )
++        endpoint = Endpoint.model_validate(self._call("GET", f"/sandboxes/{sandbox_id}/endpoints/{port}").json())
++        if self.foil.endpoint_host and not resolve_internal:
++            # foil serve names itself by the address this server used; clients may need another.
++            _, _, rest = endpoint.endpoint.partition("/")
++            endpoint.endpoint = f"{self.foil.endpoint_host}/{rest}" if rest else self.foil.endpoint_host
++        return endpoint
++
++    def get_access_renew_extend_seconds(self, sandbox_id: str) -> Optional[int]:
++        return None
++
++    # ---- foil's own: review and apply ----
++
++    def get_diff(self, sandbox_id: str, patch: bool = False) -> Any:
++        response = self._call("GET", f"/sandboxes/{sandbox_id}/diff", params={"patch": str(patch).lower()})
++        return response.text if patch else response.json()
++
++    def commit(self, sandbox_id: str, force: bool = False) -> dict:
++        return self._call("POST", f"/sandboxes/{sandbox_id}/commit", json={"force": force}).json()
++
++    # ---- diagnostics ----
++
++    def get_sandbox_diagnostic_context(self, sandbox_id: str) -> DiagnosticContext:
++        sandbox = self.get_sandbox(sandbox_id)
++        ext = sandbox.extensions or {}
++        return DiagnosticContext(
++            sandboxId=sandbox_id,
++            state=sandbox.status.state,
++            backendType="foil",
++            backendIdentifiers={k: v for k, v in ext.items() if k.startswith("foil.")},
++        )
++
++    def get_sandbox_logs(
++        self, sandbox_id: str, tail: int = 100, since: str | None = None, container: str | None = None
++    ) -> str:
++        return self._call("GET", f"/sandboxes/{sandbox_id}/logs", params={"tail": tail}).text
++
++    def get_sandbox_inspect(self, sandbox_id: str) -> str:
++        return self.get_sandbox(sandbox_id).model_dump_json(by_alias=True, indent=2)
++
++    def get_sandbox_events(self, sandbox_id: str, limit: int = 50) -> str:
++        sandbox = self.get_sandbox(sandbox_id)
++        status = sandbox.status
++        return f"{status.last_transition_at or ''} {status.state} {status.reason or ''} {status.message or ''}".strip()
++
++    def get_sandbox_log_diagnostics(self, sandbox_id: str, scope: str) -> DiagnosticResult:
++        if scope.strip().lower() not in _SUPPORTED_LOG_SCOPES:
++            raise unsupported_scope_error("logs", scope, _SUPPORTED_LOG_SCOPES)
++        content = self.get_sandbox_logs(sandbox_id, tail=_LOG_LINE_LIMIT + 1)
++        content, truncated = limit_diagnostic_lines(content, _LOG_LINE_LIMIT, keep_tail=True)
++        return DiagnosticResult(sandbox_id=sandbox_id, kind="logs", scope=scope, content=content, truncated=truncated)
++
++    def get_sandbox_event_diagnostics(self, sandbox_id: str, scope: str) -> DiagnosticResult:
++        if scope.strip().lower() not in _SUPPORTED_EVENT_SCOPES:
++            raise unsupported_scope_error("events", scope, _SUPPORTED_EVENT_SCOPES)
++        return DiagnosticResult(sandbox_id=sandbox_id, kind="events", scope=scope, content=self.get_sandbox_events(sandbox_id))
+diff --git a/server/opensandbox_server/services/snapshot_runtime_factory.py b/server/opensandbox_server/services/snapshot_runtime_factory.py
+index 3ceac12..174b0fb 100644
+--- a/server/opensandbox_server/services/snapshot_runtime_factory.py
++++ b/server/opensandbox_server/services/snapshot_runtime_factory.py
+@@ -192,6 +192,13 @@ def create_snapshot_runtime(
+         )
+         return CompositeSnapshotRuntime(kubernetes_runtime, fsb_runtime)
+ 
++    if runtime_type == "foil":
++        # A foil sandbox is already a copy-on-write branch; its changes are
++        # reviewed and committed through foil, not snapshotted.
++        from opensandbox_server.services.snapshot_runtime import NoopSnapshotRuntime
++
++        return NoopSnapshotRuntime()
++
+     raise ValueError(f"Unsupported snapshot runtime type: {runtime_type}")
+ 
+ 
+diff --git a/server/tests/test_foil_service.py b/server/tests/test_foil_service.py
+new file mode 100644
+index 0000000..d92b41d
+--- /dev/null
++++ b/server/tests/test_foil_service.py
+@@ -0,0 +1,210 @@
++# Copyright 2026 The OpenSandbox Authors
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++"""Foil runtime: the service against a fake `foil serve`, and (when FOIL_BIN
++names a foil binary) against a real one."""
++
++import asyncio
++import json
++import os
++import shutil
++import socket
++import subprocess
++import time
++from datetime import datetime, timedelta, timezone
++
++import httpx
++import pytest
++from fastapi import HTTPException
++
++from opensandbox_server.api.schema import (
++    CreateSandboxRequest,
++    ListSandboxesRequest,
++    RenewSandboxExpirationRequest,
++)
++from opensandbox_server.config import AppConfig, FoilConfig, RuntimeConfig
++from opensandbox_server.services.factory import create_sandbox_service
++from opensandbox_server.services.foil import FoilSandboxService
++
++SANDBOX = {
++    "id": "0b6c1d2e-1111-4222-8333-444455556666",
++    "status": {"state": "Running", "lastTransitionAt": "2026-10-27T10:00:00Z"},
++    "entrypoint": ["tail", "-f", "/dev/null"],
++    "createdAt": "2026-10-27T10:00:00Z",
++    "metadata": {"team": "a"},
++    "extensions": {"foil.branch": "osb-0b6c1d2e", "foil.workspace": "/w", "foil.strict": "true"},
++}
++
++
++def config(**foil) -> AppConfig:
++    return AppConfig(
++        runtime=RuntimeConfig(type="foil", execd_image="unused-by-foil"),
++        foil=FoilConfig(api_key="k", **foil),
++    )
++
++
++def service_with(handler, **foil) -> FoilSandboxService:
++    cfg = config(**foil)
++    client = httpx.Client(
++        base_url="http://foil/v1",
++        headers={"OPEN-SANDBOX-API-KEY": "k"},
++        transport=httpx.MockTransport(handler),
++    )
++    return FoilSandboxService(cfg, client=client)
++
++
++def create_request(**extra) -> CreateSandboxRequest:
++    return CreateSandboxRequest.model_validate(
++        {"image": {"uri": "foil"}, "entrypoint": ["tail", "-f", "/dev/null"], "resourceLimits": {"cpu": "1"}, "timeout": 600, **extra}
++    )
++
++
++def test_the_factory_builds_the_foil_runtime():
++    assert isinstance(create_sandbox_service(config=config()), FoilSandboxService)
++
++
++def test_a_key_is_required(monkeypatch):
++    monkeypatch.delenv("FOIL_SERVE_API_KEY", raising=False)
++    cfg = AppConfig(runtime=RuntimeConfig(type="foil", execd_image="x"), foil=FoilConfig())
++    with pytest.raises(ValueError):
++        FoilSandboxService(cfg)
++
++
++def test_create_forwards_the_request_and_the_default_workspace():
++    seen = {}
++
++    def handler(request: httpx.Request) -> httpx.Response:
++        seen["path"] = request.url.path
++        seen["key"] = request.headers["OPEN-SANDBOX-API-KEY"]
++        seen["body"] = json.loads(request.content)
++        return httpx.Response(202, json=SANDBOX)
++
++    service = service_with(handler, workspace="/w")
++    created = asyncio.run(service.create_sandbox(create_request(metadata={"team": "a"})))
++    assert created.id == SANDBOX["id"]
++    assert created.status.state == "Running"
++    assert seen["path"] == "/v1/sandboxes"
++    assert seen["key"] == "k"
++    assert seen["body"]["image"] == {"uri": "foil"}
++    assert seen["body"]["metadata"] == {"team": "a"}
++    assert seen["body"]["extensions"]["foil.workspace"] == "/w"
++
++
++def test_lifecycle_calls_map_one_to_one():
++    calls = []
++
++    def handler(request: httpx.Request) -> httpx.Response:
++        calls.append((request.method, request.url.path, str(request.url.query, "ascii")))
++        path = request.url.path
++        if path.endswith("/renew-expiration"):
++            return httpx.Response(200, json={"expiresAt": "2026-10-28T10:00:00Z"})
++        if path.endswith("/endpoints/44772"):
++            return httpx.Response(200, json={"endpoint": "127.0.0.1:8090/v1/sandboxes/x/proxy/44772", "headers": {"X-EXECD-ACCESS-TOKEN": "t"}})
++        if path == "/v1/sandboxes" and request.method == "GET":
++            pagination = {"page": 1, "pageSize": 20, "totalItems": 1, "totalPages": 1, "hasNextPage": False}
++            return httpx.Response(200, json={"items": [SANDBOX], "pagination": pagination})
++        if request.method in ("DELETE",):
++            return httpx.Response(204)
++        if path.endswith(("/pause", "/resume")):
++            return httpx.Response(202)
++        return httpx.Response(200, json=SANDBOX)
++
++    service = service_with(handler, endpoint_host="foil.example:9000")
++    sid = SANDBOX["id"]
++    assert service.get_sandbox(sid).id == sid
++    listed = service.list_sandboxes(ListSandboxesRequest.model_validate({"filter": {"state": ["Running"], "metadata": {"team": "a"}}}))
++    assert [s.id for s in listed.items] == [sid]
++    service.pause_sandbox(sid)
++    service.resume_sandbox(sid)
++    renewed = service.renew_expiration(sid, RenewSandboxExpirationRequest(expiresAt=datetime.now(timezone.utc) + timedelta(hours=1)))
++    assert renewed.expires_at.year == 2026
++    assert service.patch_sandbox_metadata(sid, {"team": None}).id == sid
++    endpoint = service.get_endpoint(sid, 44772)
++    assert endpoint.endpoint == "foil.example:9000/v1/sandboxes/x/proxy/44772"
++    assert endpoint.headers == {"X-EXECD-ACCESS-TOKEN": "t"}
++    assert service.get_endpoint(sid, 44772, resolve_internal=True).endpoint.startswith("127.0.0.1:8090/")
++    service.delete_sandbox(sid)
++    methods = [(m, p.rsplit("/", 1)[-1]) for m, p, _ in calls]
++    assert ("POST", "pause") in methods and ("POST", "resume") in methods and ("DELETE", sid) in methods
++    list_query = next(q for m, p, q in calls if m == "GET" and p == "/v1/sandboxes")
++    assert "state=Running" in list_query and "metadata=team%3Da" in list_query
++
++
++def test_errors_keep_their_status_and_say_foil():
++    def handler(request: httpx.Request) -> httpx.Response:
++        return httpx.Response(409, json={"code": "CONFLICT", "message": "changed in /w since the sandbox started: a.txt"})
++
++    service = service_with(handler)
++    with pytest.raises(HTTPException) as err:
++        service.commit(SANDBOX["id"])
++    assert err.value.status_code == 409
++    assert err.value.detail["code"] == "FOIL::CONFLICT"
++
++
++def test_an_unreachable_foil_serve_is_a_503():
++    def handler(request: httpx.Request) -> httpx.Response:
++        raise httpx.ConnectError("refused")
++
++    with pytest.raises(HTTPException) as err:
++        service_with(handler).get_sandbox("x")
++    assert err.value.status_code == 503
++
++
++def test_signed_endpoints_are_refused():
++    service = service_with(lambda r: httpx.Response(200, json={"endpoint": "h/p"}))
++    with pytest.raises(HTTPException) as err:
++        service.get_endpoint("x", 44772, expires=int(time.time()) + 60)
++    assert err.value.status_code == 400
++
++
++def free_port() -> int:
++    with socket.socket() as s:
++        s.bind(("127.0.0.1", 0))
++        return s.getsockname()[1]
++
++
++@pytest.mark.skipif(not os.environ.get("FOIL_BIN") or not shutil.which(os.environ.get("FOIL_BIN", "")), reason="FOIL_BIN names no foil binary")
++def test_against_a_real_foil_serve(tmp_path):
++    workspace = tmp_path / "ws"
++    workspace.mkdir()
++    (workspace / "a.txt").write_text("old\n")
++    port = free_port()
++    env = dict(os.environ, OPEN_SANDBOX_API_KEY="k", FOIL_HOME=str(tmp_path / "foil-home"))
++    proc = subprocess.Popen(
++        [os.environ["FOIL_BIN"], "serve", "--listen", f"127.0.0.1:{port}", "-w", str(workspace)],
++        env=env,
++        stderr=subprocess.DEVNULL,
++    )
++    try:
++        for _ in range(100):
++            try:
++                httpx.get(f"http://127.0.0.1:{port}/health")
++                break
++            except httpx.HTTPError:
++                time.sleep(0.05)
++        service = FoilSandboxService(config(url=f"http://127.0.0.1:{port}"))
++        created = asyncio.run(service.create_sandbox(create_request()))
++        endpoint = service.get_endpoint(created.id, 44772)
++        events = httpx.post(f"http://{endpoint.endpoint}/command", headers=endpoint.headers, json={"command": "echo new > a.txt"})
++        assert events.status_code == 200
++        assert (workspace / "a.txt").read_text() == "old\n"
++        assert service.get_diff(created.id)["changes"] == [{"kind": "M", "path": "a.txt"}]
++        assert service.commit(created.id)["applied"] == 1
++        assert (workspace / "a.txt").read_text() == "new\n"
++        with pytest.raises(HTTPException) as err:
++            service.get_sandbox(created.id)
++        assert err.value.status_code == 404
++    finally:
++        proc.terminate()
++        proc.wait()

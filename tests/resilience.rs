@@ -228,7 +228,9 @@ fn a_full_disk_mid_commit_is_resumable() {
         return;
     }
     let sudo = |args: &[&str]| std::process::Command::new("sudo").arg("-n").args(args).output().unwrap();
-    if !sudo(&["true"]).status.success() {
+    // No sudo at all (a container) counts as no passwordless sudo.
+    let has_sudo = std::process::Command::new("sudo").args(["-n", "true"]).output().is_ok_and(|o| o.status.success());
+    if !has_sudo {
         assert!(std::env::var_os("FOIL_REQUIRE_SUDO").is_none(), "passwordless sudo required");
         eprintln!("skipped: needs passwordless sudo");
         return;

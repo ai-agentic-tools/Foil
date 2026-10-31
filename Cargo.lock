@@ -195,6 +195,7 @@ dependencies = [
  "criterion",
  "libc",
  "rustls",
+ "serde_json",
  "webpki-roots",
 ]
 

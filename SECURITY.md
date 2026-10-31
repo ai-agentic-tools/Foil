@@ -72,6 +72,15 @@ reads are not restricted.
   the machine's loopback (only foil's proxy port is allowed, and the proxy
   wants a per-run token), and reads outside home folders and other volumes
   are not hidden. Use `foil vm` for hostile code.
+- **`foil serve`** checks `OPEN_SANDBOX_API_KEY` on the lifecycle API and a
+  per-sandbox token (or the key) on the execd relay, both outside the
+  sandboxes; neither reaches a sandbox (the key is removed from every
+  run's environment), and each sandbox's socket is in a folder of its own,
+  which is all a strict view shows of the others. Sandboxes run with the
+  options `foil serve` was given: without `--strict` a sandbox is only a
+  branch, with foil's environment and your access. It listens on loopback by
+  default; on another address anyone who has the key controls the
+  sandboxes, over plain HTTP.
 - **Resource exhaustion** is bounded only with `--memory`, `--cpus`,
   `--pids` and `--timeout`; there is no disk quota yet beyond the
   filesystem's own.

@@ -122,6 +122,43 @@ jobs:
       - name: Doctor
         run: target/debug/foil doctor
 
+  # `foil serve` with the unmodified OpenSandbox Python SDK, plain and
+  # strict; on Linux also OpenSandbox's own server tests for the foil
+  # runtime (integrations/opensandbox/runtime), on the commit it is based on.
+  opensandbox:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        run: cargo build
+      - name: Allow foil to use user namespaces
+        if: runner.os == 'Linux'
+        run: sudo target/debug/foil setup
+      - name: SDK end to end
+        run: |
+          python -m pip install -q opensandbox httpx
+          FOIL=$PWD/target/debug/foil integrations/opensandbox/run-e2e.sh
+          FOIL=$PWD/target/debug/foil integrations/opensandbox/run-e2e.sh --strict
+      - name: OpenSandbox server with the foil runtime
+        if: runner.os == 'Linux'
+        run: |
+          base=$(cat integrations/opensandbox/runtime/BASE)
+          git clone -q https://github.com/alibaba/OpenSandbox /tmp/osb
+          git -C /tmp/osb checkout -q "$base"
+          git -C /tmp/osb apply "$PWD/integrations/opensandbox/runtime/opensandbox-foil-runtime.patch"
+          pip install -q uv
+          cd /tmp/osb/server
+          SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 uv sync -q
+          FOIL_BIN=$GITHUB_WORKSPACE/target/debug/foil uv run pytest -q -p no:warnings tests/test_foil_service.py tests/test_config.py
+
   # The same suite inside a Docker container, with the settings from
   # contrib/docker/README.md.
   container:

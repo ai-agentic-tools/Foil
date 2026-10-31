@@ -62,6 +62,11 @@ usage: foil run [options] [--] <command> [args...]
                                delete branch NAME; the workspace is untouched
                                (--force: also after an interrupted commit)
        foil list [--json]      list branches and their workspaces
+       foil serve [--listen ADDR] [-w DIR...] [run options]
+                               serve OpenSandbox's API (default 127.0.0.1:8080):
+                               each sandbox is a branch of DIR (default: .) with
+                               the run options; OPEN_SANDBOX_API_KEY is the key
+                               clients must send (one is made if unset)
        foil doctor             check what works on this machine
        foil setup [--print]    allow foil to use user namespaces (Ubuntu; as root)
        foil vm setup [DIR...] | foil vm [foil args] | foil vm stop | delete
@@ -100,6 +105,7 @@ fn main() {
         #[cfg(target_os = "linux")]
         Some("__pid1") => foil::pid1::main(rest.strip_prefix(&[OsString::from("--")][..]).unwrap_or(&rest)),
         Some("__proxy") => foil::proxy::main(&rest),
+        Some("__execd") => foil::execd::main(&rest),
         #[cfg(target_os = "macos")]
         Some("__trash") => {
             if let Some(dir) = rest.first() {
@@ -110,6 +116,7 @@ fn main() {
         Some("__guard") => foil::procs::guard_main(&rest),
         #[cfg(target_os = "macos")]
         Some("vm") => finish(foil::vm::main(&rest)),
+        Some("serve") => serve(rest),
         Some("diff") => diff(rest),
         Some("commit") => {
             let (flags, name) = flags_and_name(rest, &["--force", "--all"]);
@@ -138,6 +145,61 @@ fn main() {
         Some("--help" | "-h" | "help") => println!("{USAGE}"),
         _ => usage(),
     }
+}
+
+/// `foil serve`: its own options, then `foil run` options for every sandbox.
+fn serve(args: Vec<OsString>) {
+    let mut listen = "127.0.0.1:8080".to_owned();
+    let mut workspaces = Vec::new();
+    let mut run_flags = Vec::new();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--listen") => listen = args.next().and_then(|v| v.into_string().ok()).unwrap_or_else(|| usage()),
+            Some("-w" | "--workspace") => {
+                let dir = PathBuf::from(args.next().unwrap_or_else(|| usage()));
+                workspaces.push(dir.canonicalize().unwrap_or_else(|err| {
+                    eprintln!("foil: {}: {err}", dir.display());
+                    exit(2)
+                }));
+            }
+            _ => run_flags.push(arg),
+        }
+    }
+    if workspaces.is_empty() {
+        workspaces.push(std::env::current_dir().and_then(|d| d.canonicalize()).unwrap_or_else(|err| {
+            eprintln!("foil: {err}");
+            exit(2)
+        }));
+    }
+    // The run options must parse as `foil run` options, on their own.
+    let mut check = run_flags.clone();
+    check.push("true".into());
+    let spec = parse_run(check, RunSpec::default());
+    if spec.command.len() != 1 || spec.branch_name.is_some() || spec.timeout.is_some() {
+        eprintln!("foil: foil serve takes --listen, -w and `foil run` options except -b and --timeout");
+        exit(2);
+    }
+    let from_env = std::env::var("OPEN_SANDBOX_API_KEY");
+    // Sandboxes inherit foil's environment unless strict: the key must not be in it.
+    std::env::remove_var("OPEN_SANDBOX_API_KEY");
+    let api_key = match from_env {
+        Ok(key) if !key.is_empty() => key,
+        _ => {
+            let key = foil::execd::random_hex(16);
+            eprintln!("foil serve: API key (set OPEN_SANDBOX_API_KEY to choose one): {key}");
+            key
+        }
+    };
+    let config = foil::serve::Config {
+        listen,
+        workspaces,
+        run_flags,
+        strict: spec.options.strict,
+        no_network: spec.options.no_network,
+        api_key,
+    };
+    finish(foil::serve::main(config))
 }
 
 /// A parsed `foil run` (or `foil agent`) request.
@@ -198,6 +260,7 @@ fn parse_run(args: Vec<OsString>, mut spec: RunSpec) -> RunSpec {
             "-w" | "--workspace" => spec.workspace = Some(PathBuf::from(&value)),
             "--allow-write" => o.allow_write.push(PathBuf::from(&value)),
             "--allow-read" => o.allow_read.push(PathBuf::from(&value)),
+            "--listen-socket" => o.listen.push(PathBuf::from(&value)),
             "--allow-host" => spec.allow_host.push(text()),
             "--allow-env" => o.allow_env.push(text()),
             "--inject-key" => spec.inject.push(text()),
@@ -230,6 +293,7 @@ fn run_flag_takes_value(flag: &str) -> bool {
             | "--workspace"
             | "--allow-write"
             | "--allow-read"
+            | "--listen-socket"
             | "--allow-host"
             | "--allow-env"
             | "--inject-key"
@@ -257,6 +321,13 @@ fn execute(spec: &RunSpec) -> Termination {
     let mut options = spec.options.clone();
     if (!spec.allow_host.is_empty() || !spec.inject.is_empty()) && !options.strict {
         fail(std::io::Error::other("--allow-host and --inject-key need --strict"));
+    }
+    if options.strict {
+        // The view shows each socket's folder from the host, so a socket
+        // made inside is reachable from outside.
+        for socket in &options.listen {
+            options.allow_write.push(socket.parent().map(PathBuf::from).unwrap_or_default());
+        }
     }
     if let Err(err) = foil::proxy::check_inject(&spec.inject) {
         fail(err)

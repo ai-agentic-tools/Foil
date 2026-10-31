@@ -19,6 +19,7 @@ OpenSandbox compatibility.
   OpenSandbox's server (with OSEP-0025, a draft proposal).
 - `install.sh`: `FOIL_VERSION` picks a release; `FOIL_NO_SETUP=1` and
   containers skip the AppArmor setup.
+- Pull request and issue templates, and a code of conduct.
 
 ## 0.4.0 — 2026-10-26
 

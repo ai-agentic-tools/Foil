@@ -1,7 +1,8 @@
 # Contributing
 
-Thanks for helping. Bug reports with a reproducer are the most valuable
-contribution: the exact command, `foil doctor` output, and what you expected.
+Thanks for helping. Please follow the [code of conduct](CODE_OF_CONDUCT.md).
+Bug reports with a reproducer are the most valuable contribution: the exact
+command, `foil doctor` output, and what you expected.
 
 ## Building and testing
 

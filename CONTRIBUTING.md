@@ -25,6 +25,15 @@ random file trees (`FOIL_DIFF_CASES=10000` for a long run);
 `bench/matrix/lima-matrix.sh` runs the suite on other distributions and
 kernels; `contrib/docker/test-in-container.sh` runs it inside Docker.
 
+## License and CLA
+
+Foil is licensed under [Apache-2.0](LICENSE). Before your first pull request
+can be merged, you sign the [Contributor License Agreement](CLA.md): a bot
+comments on the pull request, and you reply with the sentence it asks for.
+It covers all your later contributions too. You keep the copyright in your
+work; the CLA lets the project keep licensing it, including in other editions
+of Foil.
+
 ## Changes
 
 - One topic per pull request, with a test that fails without the change.

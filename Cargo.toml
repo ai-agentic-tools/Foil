@@ -2,11 +2,11 @@
 name = "foil"
 version = "0.3.0"
 edition = "2021"
-description = "Instant copy-on-write branches and a sandbox for AI agents working in your repo"
+description = "A local sandbox for AI coding agents: instant copy-on-write branches of your repo, reviewed before they are committed"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ai-agentic-tools/foil"
 readme = "README.md"
-keywords = ["sandbox", "ai-agents", "overlayfs", "copy-on-write", "linux"]
+keywords = ["sandbox", "ai-agents", "claude-code", "copy-on-write", "llm"]
 categories = ["command-line-utilities", "development-tools", "filesystem"]
 # Distributed as release binaries; not on crates.io.
 publish = false

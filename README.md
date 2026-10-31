@@ -1,6 +1,14 @@
-# foil
+# Foil: a local sandbox for AI coding agents
+
+[![CI](https://github.com/ai-agentic-tools/foil/actions/workflows/ci.yml/badge.svg)](https://github.com/ai-agentic-tools/foil/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/ai-agentic-tools/foil)](https://github.com/ai-agentic-tools/foil/releases/latest)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
 **Let AI agents loose on your repo without letting them loose on your machine.**
+
+Run Claude Code, OpenAI Codex or any other agent or script in an instant
+copy-on-write branch of your project, then review the diff and commit it, or
+throw it away. No Docker, no root, no VM. Linux and macOS.
 
 `foil` gives a coding agent an instant, private copy-on-write *branch* of your
 working folder. The agent edits, builds and tests freely; your real folder
@@ -85,6 +93,23 @@ the copy.
 
 *Measured on Ubuntu 26.04, Linux 7.0, 4 vCPU VM. The branch cost does not
 grow with the workspace: nothing is copied until it is written.*
+
+## How foil compares
+
+| | git worktree | Docker / dev container | Cloud sandbox (E2B, Daytona, OpenSandbox) | Agent's own sandbox mode | **foil** |
+|---|---|---|---|---|---|
+| Ready in | seconds (checkout) | seconds to minutes (image) | under a second to seconds, plus upload | instant | **~25 ms, any repo size** |
+| Has untracked files and build state | no | if mounted or copied | if uploaded | yes | **yes** |
+| Agent writes reach your folder | in the worktree; you merge | directly, if mounted | after you download them | directly | **only when you `foil commit`** |
+| Review the whole change first | via git | no | no | no | **`foil diff`, then commit or abort** |
+| Hides `~/.ssh`, tokens, other repos | no | yes | yes | partly | **yes (`--strict`)** |
+| Network allow-list, key hidden from agent | no | add a proxy | varies | partly | **yes (`--allow-host`, `--inject-key`)** |
+| Needs | git | a daemon and an image | an account, a network | the agent | **one 2 MB binary** |
+| Kernel isolation | none | shared kernel | microVM or VM | shared kernel | shared kernel ([`foil vm`](#macos) or a VM for hostile code) |
+
+Use a cloud microVM for code you don't trust at all. Use foil for the agents
+you run every day on your own projects, where the risk is a wrong or misled
+agent, not an attacker with a kernel exploit.
 
 ## What you get
 
@@ -326,6 +351,42 @@ started have exited, the namespaces vanish and the branch's changes sit in
 Limits use a transient systemd scope (`systemd-run --user --scope`), which
 foil creates by re-running itself inside it; the same scope gives the run a
 cleanup cgroup when your login shell has none.
+
+## FAQ
+
+**How do I run Claude Code in a sandbox?** `foil agent claude` in your
+project. Claude Code runs in a strict branch: it can edit, build and test,
+can reach only Anthropic's API and the hosts you allow, never sees your API
+key, and changes nothing until you commit. `foil agent codex` does the same
+for OpenAI's Codex CLI.
+
+**Can several agents work on the same repo at once?** Yes. Each gets its own
+branch (`foil run -b NAME`), and they don't see each other's changes.
+`foil fanout -n 3 --check "make test"` runs N attempts in parallel and
+commits the best passing one. A commit is refused if another commit already
+changed the same file.
+
+**What about other agents (Aider, Gemini CLI, OpenHands, my own)?**
+`foil run --strict --allow-host HOST -- COMMAND` works with any command;
+`foil agent` adds ready-made profiles for Claude Code and Codex.
+
+**How is this different from git worktrees?** A worktree is a second
+checkout: tracked files only, no build state, slower for big repos, and it
+protects nothing outside itself. A foil branch is the whole folder as it is,
+in about 25 ms, with the rest of the machine out of reach.
+
+**Do I need Docker, root or a daemon?** No. foil uses Linux user namespaces
+and overlayfs (on macOS, APFS clones and Seatbelt) as your own user. On Ubuntu 23.10 or newer, `sudo foil setup`
+once allows user namespaces for the foil binary.
+
+**Is it a security boundary?** Against a buggy, careless or prompt-injected
+agent, yes: that is what it is built and tested for
+([`tests/strict.rs`](tests/strict.rs) tries each escape). Against a kernel
+exploit, no: run hostile code in a VM. See [SECURITY.md](SECURITY.md).
+
+**Which systems are supported?** Linux 5.12 or newer (Ubuntu 22.04+,
+Debian 12+, Fedora 36+) and macOS 12 or newer, Apple silicon or Intel
+([macOS](#macos) lists what differs). Windows: in a Linux VM.
 
 ## Development
 

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Pull request and issue templates, and a code of conduct.
+
 ## 0.4.0 — 2026-10-26
 
 macOS support.

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Licensed under Apache-2.0 alone (was MIT OR Apache-2.0; 0.3.0 and earlier
+  keep their license). Contributions need the [CLA](CLA.md), signed once by
+  comment on the first pull request.
 - Pull request and issue templates, and a code of conduct.
 
 ## 0.3.0 — 2026-10-24

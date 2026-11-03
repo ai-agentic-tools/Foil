@@ -58,6 +58,8 @@ macOS support, OpenSandbox compatibility, and a new license.
 
 ### Packaging
 
+- rustls 0.23.46, which fixes four advisories in 0.23.45 (one medium: TLS
+  secrets in a session's `Debug` output).
 - On crates.io as `foil-sandbox` (`cargo install foil-sandbox`; the command
   is still `foil`).
 - A Homebrew tap for macOS and Linux.

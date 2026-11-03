@@ -1,0 +1,20 @@
+{
+  "label": "lite",
+  "concurrency": 1,
+  "programs": 164,
+  "passed": 164,
+  "wall_seconds": 44.491270033991896,
+  "programs_per_second": 3.686116397097721,
+  "latency_ms": {
+    "p50": 265.0238329079002,
+    "p90": 290.25981202721596,
+    "p99": 327.0587100414559,
+    "mean": 271.2378346300173
+  },
+  "failures": [],
+  "probes": {
+    "home": "home: ['.bashrc', '.profile', '.ssh']",
+    "network": "network: blocked URLError",
+    "leftover": "leftover: started"
+  }
+}

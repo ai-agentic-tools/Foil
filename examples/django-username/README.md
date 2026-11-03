@@ -72,3 +72,16 @@ foil fanout -n 3 --agent claude --timeout 15m --check "make test" -- -p "fix iss
 foil diff --patch <best>     # review
 foil pick <best>             # commit it, discard the rest
 ```
+
+## The screencast
+
+The animation at the top of foil's README is a real run of
+`screencast.sh` (the same run as `run.sh`, typed out), recorded on
+2026-11-02 with Claude Haiku: all three attempts passed, 22.4 s.
+
+```sh
+asciinema rec -i 2 -c ./screencast.sh demo.cast      # needs ANTHROPIC_API_KEY
+python3 cast-to-svg.py demo.cast ../../docs/demo.svg   # pauses cut to 2 s
+```
+
+`demo.cast` is that recording (the home folder shown as `/home/me`).

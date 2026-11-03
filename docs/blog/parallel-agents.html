@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Three Claude Code agents, one Django bug, and a checkout nobody touched | Foil</title>
+<meta name="description" content="How to run several Claude Code agents on the same repository at once, each in its own copy-on-write sandbox, check every fix, and commit only the best one. A real run on a Django bug, with numbers.">
+<link rel="canonical" href="https://ai-agentic-tools.github.io/Foil/blog/parallel-agents.html">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Three Claude Code agents, one Django bug, and a checkout nobody touched">
+<meta property="og:description" content="Run several coding agents on one repo at once, each sandboxed in its own copy-on-write branch; keep the best passing fix.">
+<meta property="og:url" content="https://ai-agentic-tools.github.io/Foil/blog/parallel-agents.html">
+<meta property="og:image" content="https://raw.githubusercontent.com/ai-agentic-tools/Foil/main/.github/social-preview.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="stylesheet" href="../style.css">
+<script type="application/ld+json">
+{"@context": "https://schema.org", "@type": "BlogPosting",
+ "headline": "Three Claude Code agents, one Django bug, and a checkout nobody touched",
+ "datePublished": "2026-11-02", "author": {"@type": "Organization", "name": "The Foil maintainers", "url": "https://github.com/ai-agentic-tools"},
+ "mainEntityOfPage": "https://ai-agentic-tools.github.io/Foil/blog/parallel-agents.html"}
+</script>
+</head>
+<body>
+<header>
+  <a class="brand" href="../">foil</a>
+  <nav><a href="../">Home</a><a href="https://github.com/ai-agentic-tools/Foil#readme">Docs</a><a href="https://github.com/ai-agentic-tools/Foil">GitHub</a></nav>
+</header>
+<main>
+<article>
+  <h1>Three Claude Code agents, one Django bug, and a checkout nobody touched</h1>
+  <p class="meta">2 November 2026 · The Foil maintainers</p>
+
+  <p>Coding agents get better results when you let them run things: install packages, run the test suite, try a fix, throw it away, try again. Running three of them on the same problem and keeping the best answer is better still. Two things make that awkward on your own machine:</p>
+  <ul>
+    <li><strong>They need their own copy of the repo.</strong> Three agents editing one folder overwrite each other. A <code>git worktree</code> or <code>cp -a</code> per agent is slow on a big repo and leaves out untracked files and build state.</li>
+    <li><strong>They run with your permissions.</strong> An agent that can run <code>pytest</code> can also read <code>~/.ssh</code>, your cloud credentials and the API key it was started with, and send them anywhere.</li>
+  </ul>
+  <p><a href="https://github.com/ai-agentic-tools/Foil">Foil</a> handles both with one command. Here is a real run.</p>
+
+  <h2>The bug</h2>
+  <p><a href="https://code.djangoproject.com/ticket/30257">Django ticket #30257</a>: Django's username validators used the regex <code>^[\w.@+-]+$</code>. In Python, <code>$</code> also matches just before a trailing newline, so <code>"alice\n"</code> was accepted as a valid username. We rewound a Django checkout (about 6,000 files) to just before the upstream fix and gave the issue text to three Claude Code sessions (Haiku), at the same time.</p>
+
+  <h2>The run</h2>
+<pre><code>foil fanout -n 3 --agent claude --check "python check.py" -- -p "Fix this issue: ..."</code></pre>
+  <p><code>foil fanout</code> made three copy-on-write branches of the checkout, started one agent in each under <code>--strict</code>, waited, then ran the check (the upstream fix's own tests, hidden from the agents) inside each branch:</p>
+  <div class="demo"><img src="../demo.svg" alt="Recording of the run: three attempts pass in 22.4 s; the diff of the best is reviewed and picked" width="1099" height="650"></div>
+<pre><code>foil: 3 attempts of username in 22.4 s
+  attempt      status   check  changes  time
+  username-1   0        pass   1        20.7 s
+  username-2   0        pass   1        16.5 s
+  username-3   0        pass   1        20.8 s
+best: username-1</code></pre>
+  <p>All three agents found the right fix: <code>\A[\w.@+-]+\Z</code>, which is the fix Django shipped. Each one also ran Django's own auth test suite inside its branch first. Until the last step, <code>git status</code> in the real checkout showed nothing. Then:</p>
+<pre><code>foil diff --patch username-1     # read the change
+foil pick username-1             # apply it; discard username-2 and username-3
+applied 1 change; discarded username-2, username-3</code></pre>
+
+  <h2>What the agents could reach</h2>
+  <p>The same strict sandbox, probed from inside:</p>
+<pre><code>API key it sees:  foil-injects-the-real-key
+~/.ssh:           ls: cannot access '/home/me/.ssh': No such file or directory
+processes:        5 visible
+example.com:      urllib.error.URLError: &lt;urlopen error Tunnel connection failed: 403 Forbidden&gt;</code></pre>
+  <p>Each agent saw the checkout, the Python environment we allowed, an empty home folder and its own processes. It could reach <code>api.anthropic.com</code> and nothing else, and only through foil's proxy, which adds the real API key on the way out. The key inside the sandbox is a placeholder, so a prompt-injected agent has nothing to leak.</p>
+
+  <h2>Why copy-on-write</h2>
+  <p>A foil branch doesn't copy the repo. It's a layered view of your folder (overlayfs on Linux, APFS clones on macOS), so files are copied only when the agent writes them. On the Django checkout:</p>
+  <div class="table-wrap"><table>
+    <tr><th>A private copy of the 6,000-file checkout</th><th>time</th></tr>
+    <tr><td><code>cp -a</code></td><td>327 ms</td></tr>
+    <tr><td><code>git worktree add</code> (tracked files only)</td><td>490 ms</td></tr>
+    <tr><td><code>foil run -b</code> (branch and start)</td><td><strong>~25 ms</strong></td></tr>
+  </table></div>
+  <p>On a 1 GB, 10,000-file workspace, <code>cp -a</code> takes 1.9 s and 977 MB of disk; a foil branch still takes about 25 ms and stores only the files that change. (Linux 7.0, 4-vCPU VM. On an Intel Mac, a first branch of 10,000 files takes 0.65 s and later runs 70 ms.)</p>
+
+  <h2>Does the sandbox get in the agent's way?</h2>
+  <p>We ran Claude Code (Haiku 4.5) on 31 SWE-bench Lite tasks twice: bare, and under <code>foil agent</code> in strict mode. It solved 17/31 bare and 19/31 under foil, at $9.97 and $10.54. That's within run-to-run noise, so read it as "no worse", not "better". The first foil run found a real bug in foil (paths given through a symlink weren't visible in the sandbox). We fixed it, and that's why the numbers above come from the second run.</p>
+
+  <h2>What foil isn't</h2>
+  <p>Foil uses your machine's kernel. It protects you from an agent that's wrong or has been misled: one that deletes the wrong folder, reads secrets it shouldn't, or phones home. It doesn't protect against an attacker with a kernel exploit. For code you don't trust at all, use a microVM, or <code>foil vm</code>, which runs foil inside a Lima VM.</p>
+
+  <h2>Try it</h2>
+<pre><code>brew install ai-agentic-tools/tap/foil     # or: cargo install foil-sandbox
+cd your-repo
+foil fanout -n 3 --agent claude --timeout 15m --check "make test" -- -p "fix issue #123"</code></pre>
+  <p>The Django demo is in <a href="https://github.com/ai-agentic-tools/Foil/tree/main/examples/django-username"><code>examples/django-username</code></a> (it needs an Anthropic API key). <a href="https://github.com/ai-agentic-tools/Foil/tree/main/examples/best-of-n"><code>examples/best-of-n</code></a> runs in five seconds with no API key: four scripted agents, one of which goes rogue and gets nothing.</p>
+  <blockquote>Questions, bugs, ideas: <a href="https://github.com/ai-agentic-tools/Foil/issues">GitHub issues</a>. If foil saves you a <code>git stash</code>, a star helps others find it.</blockquote>
+</article>
+</main>
+<footer>
+  <a href="../">Foil</a> · Apache License 2.0 · <a href="https://github.com/ai-agentic-tools/Foil">GitHub</a>
+</footer>
+</body>
+</html>

@@ -106,9 +106,11 @@ fn child_dies_when_foil_is_sigkilled() {
 fn timeout_stops_the_command_and_everything_it_started() {
     // The command ignores SIGTERM and leaves a background sleeper: SIGKILL
     // after the grace period gets the command, the cleanup gets the rest.
+    // The timeout leaves room for a slow runner to start the shell; at 300 ms
+    // the Intel macOS runner sometimes stopped it before it printed the pid.
     let started = Instant::now();
     let out = Command::new(env!("CARGO_BIN_EXE_foil"))
-        .args(["run", "--timeout", "300ms", "--", "sh", "-c", "trap '' TERM; sleep 60 & echo $!; wait"])
+        .args(["run", "--timeout", "1s", "--", "sh", "-c", "trap '' TERM; sleep 60 & echo $!; wait"])
         .env("FOIL_GRACE_MS", "200")
         .output()
         .unwrap();
@@ -117,7 +119,8 @@ fn timeout_stops_the_command_and_everything_it_started() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("stopped after --timeout"));
     assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
     let sleeper = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    assert!(!sleeper.is_empty() && !is_alive(&sleeper), "sleeper {sleeper} survived");
+    assert!(!sleeper.is_empty(), "the shell never printed the sleeper's pid");
+    assert!(!is_alive(&sleeper), "sleeper {sleeper} survived");
 }
 
 #[test]

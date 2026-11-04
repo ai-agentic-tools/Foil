@@ -1,0 +1,20 @@
+{
+  "label": "none",
+  "concurrency": 1,
+  "programs": 164,
+  "passed": 164,
+  "wall_seconds": 5.965158102102578,
+  "programs_per_second": 27.492984627212792,
+  "latency_ms": {
+    "p50": 31.43903100863099,
+    "p90": 41.81147494819015,
+    "p99": 82.70096010528505,
+    "mean": 36.322559639612756
+  },
+  "failures": [],
+  "probes": {
+    "home": "home: ['.aws', '.bash_logout', '.bashrc', '.cache', '.cargo', '.claude', '.claude.json', '.config']",
+    "network": "network: reached example.com",
+    "leftover": "leftover: started"
+  }
+}

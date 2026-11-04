@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Foil benchmarks: against Docker and SandboxFusion</title>
+<meta name="description" content="foil measured with other projects' own benchmarks: OpenSandbox's create benchmark against its Docker runtime, and SandboxFusion's HumanEval execution against its root sandbox. Speed, ease and what each leaves behind.">
+<link rel="canonical" href="https://ai-agentic-tools.github.io/Foil/benchmarks.html">
+<meta property="og:title" content="Foil benchmarks: against Docker and SandboxFusion">
+<meta property="og:description" content="Other projects' own benchmarks, run with foil as the sandbox: speed, ease, and what each leaves behind.">
+<meta property="og:url" content="https://ai-agentic-tools.github.io/Foil/benchmarks.html">
+<meta property="og:image" content="https://raw.githubusercontent.com/ai-agentic-tools/Foil/main/.github/social-preview.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <a class="brand" href="./">foil</a>
+  <nav><a href="benchmarks.html">Benchmarks</a><a href="blog/parallel-agents.html">Blog</a><a href="https://github.com/ai-agentic-tools/Foil">GitHub</a></nav>
+</header>
+<main>
+  <h1>Benchmarks</h1>
+  <p class="lead">Two benchmarks other projects publish, run with foil as the sandbox and compared on the same machine: how fast, how easy to set up, and what each leaves behind.</p>
+  <p class="meta">Measured 2026-11-03 on a 4-vCPU Lima VM (Ubuntu 26.04, Linux 7.0) on an Intel Mac, foil 0.4.0. Scripts, raw results and caveats: <a href="https://github.com/ai-agentic-tools/Foil/tree/main/bench/opensandbox-method"><code>bench/opensandbox-method</code></a>, <a href="https://github.com/ai-agentic-tools/Foil/tree/main/bench/sandboxfusion"><code>bench/sandboxfusion</code></a>.</p>
+
+  <h2>OpenSandbox's create benchmark: Docker vs foil</h2>
+  <p>OpenSandbox's own <code>create-bench.py</code>, through its unchanged Python SDK, against OpenSandbox's server with its Docker runtime and against <code>foil serve</code>. Time is from the create call to the sandbox answering <code>/ping</code>; 100 creates per row. Each foil sandbox is a branch of a 6,000-file Django checkout; each Docker sandbox is an empty <code>ubuntu:24.04</code>.</p>
+  <div class="table-wrap"><table>
+    <tr><th>Started at once</th><th>Docker: succeeded</th><th>Docker: median</th><th>foil: succeeded</th><th>foil: median</th></tr>
+    <tr><td>1</td><td>100/100</td><td>1,143 ms</td><td>100/100</td><td><strong>37 ms</strong></td></tr>
+    <tr><td>10</td><td>100/100</td><td>3,130 ms</td><td>100/100</td><td><strong>236 ms</strong></td></tr>
+    <tr><td>20</td><td>99/100</td><td>5,666 ms</td><td>100/100</td><td><strong>568 ms</strong></td></tr>
+    <tr><td>50</td><td>17/100</td><td>7,000 ms</td><td><strong>100/100</strong></td><td>1,741 ms</td></tr>
+  </table></div>
+  <ul>
+    <li><strong>Left behind:</strong> 83 running Docker containers, from creates that passed the SDK's 10-second timeout but which the server finished anyway; foil left nothing.</li>
+    <li><strong>Setup:</strong> Docker needs a root daemon, about 300 MB of images, a Python server and a config file; foil needs one 3 MB binary and <code>foil serve -w DIR</code>.</li>
+    <li><strong>Not compared:</strong> OpenSandbox's Firecracker fast-sandbox (64 ms median on a 192-CPU cluster), which gives each sandbox its own kernel, a much stronger boundary than foil's.</li>
+    <li><strong>A foil weakness this found:</strong> start times grow with how many start at once, because each sandbox waits for its own systemd scope. A fix is planned.</li>
+  </ul>
+
+  <h2>SandboxFusion: its own sandbox vs foil</h2>
+  <p>ByteDance's SandboxFusion runs model-written code for HumanEval, MBPP and similar evaluations. Its <code>lite</code> sandbox is built as root from an overlay of <code>/</code>, cgroups, a network namespace and <code>chroot</code>. We added a 24-line foil mode that runs as an ordinary user, and sent all 164 HumanEval solutions through each mode. All 164 passed everywhere.</p>
+  <div class="table-wrap"><table>
+    <tr><th>At once</th><th>no sandbox</th><th>lite (root)</th><th>foil (user)</th></tr>
+    <tr><td>1</td><td>27.5 programs/s</td><td>3.7/s</td><td><strong>14.4/s</strong></td></tr>
+    <tr><td>8</td><td>67.9/s</td><td>5.7/s</td><td><strong>43.0/s</strong></td></tr>
+    <tr><td>32</td><td>60.2/s</td><td>5.8/s</td><td><strong>34.5/s</strong></td></tr>
+  </table></div>
+  <div class="table-wrap"><table>
+    <tr><th></th><th>no sandbox</th><th>lite</th><th>foil</th></tr>
+    <tr><td>A program lists the home folder</td><td>the server's: .aws, .claude, .config…</td><td>root's, including .ssh</td><td>only its Python and tools, read-only</td></tr>
+    <tr><td>A program reaches example.com</td><td>yes</td><td>no</td><td>no</td></tr>
+    <tr><td>A background process outlives the program</td><td>yes</td><td>no</td><td>no</td></tr>
+    <tr><td>Left on the machine after normal runs</td><td>1 process</td><td>up to 9 network namespaces, 42 cgroups</td><td><strong>nothing</strong></td></tr>
+    <tr><td>Left after <code>kill -9</code> of the server</td><td>1 process</td><td>81–92 overlay mounts too</td><td><strong>nothing</strong></td></tr>
+  </table></div>
+  <p class="meta">On this host every <code>lite</code> run failed until we fixed three things (cgroup v1 limits on a cgroup v2 host, a dangling <code>resolv.conf</code> symlink, and <code>/tmp</code> being its own tmpfs), and each failure left mounts behind. The <code>lite</code> numbers above include those fixes.</p>
+</main>
+<footer>
+  <a href="./">Foil</a> · Apache License 2.0 · <a href="https://github.com/ai-agentic-tools/Foil">GitHub</a>
+</footer>
+</body>
+</html>

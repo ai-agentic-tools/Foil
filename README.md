@@ -10,6 +10,8 @@ Run Claude Code, OpenAI Codex or any other agent or script in an instant
 copy-on-write branch of your project, then review the diff and commit it, or
 throw it away. No Docker, no root, no VM. Linux and macOS.
 
+<p align="center"><img src="https://raw.githubusercontent.com/ai-agentic-tools/Foil/main/docs/demo.svg" alt="Three Claude Code agents fix a real Django bug at once, each in its own foil branch; the best passing fix is reviewed and committed" width="100%"></p>
+
 `foil` gives a coding agent an instant, private copy-on-write *branch* of your
 working folder. The agent edits, builds and tests freely; your real folder
 does not change until you review the diff and `foil commit`. Add `--protect`
@@ -165,7 +167,9 @@ Linux, kernel 5.12 or newer (Ubuntu 22.04+, Debian 12+, Fedora 36+), x86_64;
 or macOS 12 or newer, Apple silicon or Intel (see [macOS](#macos)).
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ai-agentic-tools/foil/main/install.sh | sh
+brew install ai-agentic-tools/tap/foil          # macOS or Linux, with Homebrew
+curl -fsSL https://raw.githubusercontent.com/ai-agentic-tools/foil/main/install.sh | sh   # or this
+cargo install foil-sandbox                      # or from source (the command is still foil)
 foil doctor           # what works on this machine, and how to fix what doesn't
 ```
 

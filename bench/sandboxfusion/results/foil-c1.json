@@ -1,0 +1,20 @@
+{
+  "label": "foil",
+  "concurrency": 1,
+  "programs": 164,
+  "passed": 164,
+  "wall_seconds": 11.413903089938685,
+  "programs_per_second": 14.368441602116405,
+  "latency_ms": {
+    "p50": 61.69950298499316,
+    "p90": 83.92935199663043,
+    "p99": 136.27682102378458,
+    "mean": 69.53913329606422
+  },
+  "failures": [],
+  "probes": {
+    "home": "home: ['.cargo', '.local', 'foil-demo-bin', 'sf-conda']",
+    "network": "network: blocked URLError",
+    "leftover": "leftover: started"
+  }
+}

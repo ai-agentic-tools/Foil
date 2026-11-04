@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Foil: a local sandbox for AI coding agents</title>
+<meta name="description" content="Run Claude Code, Codex or any AI coding agent in an instant copy-on-write branch of your repo, review the diff, then commit or discard. No Docker, no root. Hides secrets, allow-lists the network, runs agents in parallel. Linux and macOS.">
+<link rel="canonical" href="https://ai-agentic-tools.github.io/Foil/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Foil: a local sandbox for AI coding agents">
+<meta property="og:description" content="Instant copy-on-write branches of your repo for Claude Code, Codex and other agents. Review the diff, then commit or discard.">
+<meta property="og:url" content="https://ai-agentic-tools.github.io/Foil/">
+<meta property="og:image" content="https://raw.githubusercontent.com/ai-agentic-tools/Foil/main/.github/social-preview.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="stylesheet" href="style.css">
+<script type="application/ld+json">
+{"@context": "https://schema.org", "@type": "SoftwareApplication", "name": "Foil",
+ "description": "A local sandbox for AI coding agents: instant copy-on-write branches of your repo, reviewed before they are committed.",
+ "applicationCategory": "DeveloperApplication", "operatingSystem": "Linux, macOS",
+ "license": "https://www.apache.org/licenses/LICENSE-2.0", "softwareVersion": "0.4.0",
+ "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"},
+ "codeRepository": "https://github.com/ai-agentic-tools/Foil",
+ "url": "https://ai-agentic-tools.github.io/Foil/"}
+</script>
+</head>
+<body>
+<header>
+  <a class="brand" href="./">foil</a>
+  <nav><a href="benchmarks.html">Benchmarks</a><a href="blog/parallel-agents.html">Blog</a><a href="https://github.com/ai-agentic-tools/Foil#readme">Docs</a><a href="https://github.com/ai-agentic-tools/Foil">GitHub</a></nav>
+</header>
+<main>
+  <h1>Let AI agents loose on your repo without letting them loose on your machine.</h1>
+  <p class="lead">Foil runs Claude Code, OpenAI Codex or any other agent in an instant copy-on-write branch of your project. The agent edits, builds and tests freely; your folder doesn't change until you review the diff and commit. No Docker, no root, no VM. Linux and macOS.</p>
+  <div class="cta">
+    <a class="btn primary" href="#install">Install</a>
+    <a class="btn" href="https://github.com/ai-agentic-tools/Foil">Star on GitHub</a>
+    <a class="btn" href="blog/parallel-agents.html">Read: three agents, one bug</a>
+  </div>
+
+  <div class="demo"><img src="demo.svg" alt="Three Claude Code agents fix a real Django bug at once, each in its own foil branch; the best passing fix is reviewed and committed" width="1099" height="650"></div>
+  <p class="meta">A real recorded run: three Claude Code agents fix <a href="https://code.djangoproject.com/ticket/30257">Django ticket #30257</a> at once, each in its own strict branch of a 6,000-file checkout. All three pass the hidden tests in 22.4 s; you review the best and commit it. Pauses are shortened.</p>
+
+  <h2>What it does</h2>
+  <div class="grid">
+    <div class="card"><h3>A branch in ~25 ms</h3><p>Any repo size. Nothing is copied until it is written, untracked files and build state included. On a 1 GB repo, <code>cp -a</code> takes 1.9 s.</p></div>
+    <div class="card"><h3>Review, then commit</h3><p><code>foil diff --patch</code> shows exactly what changed. <code>foil commit</code> applies it, refusing files that changed under it; <code>foil abort</code> throws it away.</p></div>
+    <div class="card"><h3>Secrets stay hidden</h3><p><code>--strict</code> hides <code>~/.ssh</code>, tokens and other repos. The agent never sees its API key: foil's proxy adds it on the way out.</p></div>
+    <div class="card"><h3>Network allow-list</h3><p>Only the hosts you name, e.g. <code>--allow-host pypi.org</code>. Everything else gets 403.</p></div>
+    <div class="card"><h3>Many agents at once</h3><p><code>foil fanout -n 3 --check "make test"</code> runs attempts in parallel branches and keeps the best passing one.</p></div>
+    <div class="card"><h3>Nothing left behind</h3><p>Every process a run started is stopped at the end, daemons too. <code>--memory</code>, <code>--cpus</code>, <code>--pids</code> and <code>--timeout</code> cap runaways.</p></div>
+  </div>
+
+  <h2 id="install">Install</h2>
+<pre><code>brew install ai-agentic-tools/tap/foil        # macOS or Linux
+curl -fsSL https://raw.githubusercontent.com/ai-agentic-tools/foil/main/install.sh | sh
+cargo install foil-sandbox                    # from source; the command is foil
+foil doctor                                   # what works on this machine</code></pre>
+  <p>Then, in any project:</p>
+<pre><code>foil agent claude                  # Claude Code in a strict branch of this folder
+foil run -b fix-login --strict --allow-host pypi.org -- ./my-agent
+foil diff --patch fix-login        # review exactly what changed
+foil commit fix-login              # apply it (or: foil abort fix-login)</code></pre>
+
+  <h2>How it compares</h2>
+  <div class="table-wrap"><table>
+    <tr><th></th><th>git worktree</th><th>Docker</th><th>Cloud sandbox</th><th>foil</th></tr>
+    <tr><td>Ready in</td><td>seconds</td><td>seconds to minutes</td><td>seconds, plus upload</td><td><strong>~25 ms, any size</strong></td></tr>
+    <tr><td>Untracked files and build state</td><td>no</td><td>if mounted</td><td>if uploaded</td><td><strong>yes</strong></td></tr>
+    <tr><td>Review before it reaches your folder</td><td>via git</td><td>no</td><td>no</td><td><strong>yes</strong></td></tr>
+    <tr><td>Hides ~/.ssh and tokens</td><td>no</td><td>yes</td><td>yes</td><td><strong>yes</strong></td></tr>
+    <tr><td>Needs</td><td>git</td><td>a daemon, an image</td><td>an account, a network</td><td><strong>one 2 MB binary</strong></td></tr>
+  </table></div>
+  <p class="meta">For code you don't trust at all, use a microVM (or <code>foil vm</code>). Foil is for the agents you run every day on your own projects, where the risk is a wrong or misled agent.</p>
+</main>
+<footer>
+  Foil is open source under the <a href="https://github.com/ai-agentic-tools/Foil/blob/main/LICENSE">Apache License 2.0</a>. ·
+  <a href="https://github.com/ai-agentic-tools/Foil">GitHub</a> ·
+  <a href="https://github.com/ai-agentic-tools/Foil/releases">Releases</a> ·
+  <a href="https://github.com/ai-agentic-tools/Foil/blob/main/CONTRIBUTING.md">Contribute</a>
+</footer>
+</body>
+</html>

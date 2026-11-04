@@ -1,0 +1,611 @@
+{
+  "label": "docker",
+  "measurement": "SDK create through execd /ping readiness",
+  "settings": {
+    "domain": "127.0.0.1:18200",
+    "image": "ubuntu:24.04",
+    "n": 100,
+    "concurrency": 50,
+    "warmup": 2,
+    "batch_pause_seconds": 5.0,
+    "ping_interval_ms": 10,
+    "request_timeout_seconds": 10.0
+  },
+  "successes": 17,
+  "failures": 83,
+  "wall_seconds_including_pauses": 35.6243221599143,
+  "percentile_method": "nearest_rank",
+  "successful_latency_seconds": {
+    "mean": 6.802382894134259,
+    "p50": 6.999773694085889,
+    "p90": 9.895778002100997,
+    "p99": 10.027380667044781,
+    "min": 3.667172868968919,
+    "max": 10.027380667044781
+  },
+  "attempts": [
+    {
+      "index": 1,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 2,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 3,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 4,
+      "success": true,
+      "ready_seconds": 3.667172868968919
+    },
+    {
+      "index": 5,
+      "success": true,
+      "ready_seconds": 7.214323343010619
+    },
+    {
+      "index": 6,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 7,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 8,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 9,
+      "success": true,
+      "ready_seconds": 6.999773694085889
+    },
+    {
+      "index": 10,
+      "success": true,
+      "ready_seconds": 8.268795426003635
+    },
+    {
+      "index": 11,
+      "success": true,
+      "ready_seconds": 4.316270814044401
+    },
+    {
+      "index": 12,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 13,
+      "success": true,
+      "ready_seconds": 7.791507511981763
+    },
+    {
+      "index": 14,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 15,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 16,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 17,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 18,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 19,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 20,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 21,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 22,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 23,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 24,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 25,
+      "success": true,
+      "ready_seconds": 4.9130876620765775
+    },
+    {
+      "index": 26,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 27,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 28,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 29,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 30,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 31,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 32,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 33,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 34,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 35,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 36,
+      "success": true,
+      "ready_seconds": 4.3420197640080005
+    },
+    {
+      "index": 37,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 38,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 39,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 40,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 41,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 42,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 43,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 44,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 45,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 46,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 47,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 48,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 49,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 50,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 51,
+      "success": true,
+      "ready_seconds": 6.934139210963622
+    },
+    {
+      "index": 52,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 53,
+      "success": true,
+      "ready_seconds": 6.146123963058926
+    },
+    {
+      "index": 54,
+      "success": true,
+      "ready_seconds": 8.072801753995009
+    },
+    {
+      "index": 55,
+      "success": true,
+      "ready_seconds": 5.94968509406317
+    },
+    {
+      "index": 56,
+      "success": true,
+      "ready_seconds": 8.805704445927404
+    },
+    {
+      "index": 57,
+      "success": true,
+      "ready_seconds": 10.027380667044781
+    },
+    {
+      "index": 58,
+      "success": true,
+      "ready_seconds": 7.2829286840278655
+    },
+    {
+      "index": 59,
+      "success": true,
+      "ready_seconds": 9.895778002100997
+    },
+    {
+      "index": 60,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 61,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 62,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 63,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 64,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 65,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 66,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 67,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 68,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 69,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 70,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 71,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 72,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 73,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 74,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 75,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 76,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 77,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 78,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 79,
+      "success": true,
+      "ready_seconds": 5.013016294920817
+    },
+    {
+      "index": 80,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 81,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 82,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 83,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 84,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 85,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 86,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 87,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 88,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 89,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 90,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 91,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 92,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 93,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 94,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 95,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 96,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 97,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 98,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 99,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    },
+    {
+      "index": 100,
+      "success": false,
+      "error_type": "SandboxTimeoutException",
+      "error": "Request timed out:  | [TIMEOUT] Request timed out: "
+    }
+  ]
+}

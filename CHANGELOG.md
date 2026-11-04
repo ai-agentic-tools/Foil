@@ -1,36 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 — 2026-11-02
 
-- Linux: the command, not foil, is the OOM killer's first choice
-  (`oom_score_adj` 1000, inherited by everything it starts). Under a tight
-  `--memory` the kernel could kill foil itself, so the run ended with no
-  message and no cleanup.
-OpenSandbox compatibility.
+macOS support, OpenSandbox compatibility, and a new license.
 
-- `foil serve`: OpenSandbox's lifecycle API, with foil branches as
-  sandboxes; each sandbox runs `foil __execd` (OpenSandbox's execd API:
-  commands, sessions, files, metrics) inside one long-lived `foil run`, and
-  the server relays to it. Extra endpoints `diff`, `commit` and `logs`;
-  `networkPolicy` becomes `--strict` + `--allow-host`; sandboxes survive a
-  server restart; pause freezes the run's cgroup (stops its processes
-  without one, and on macOS). The unchanged OpenSandbox Python SDK passes
-  `integrations/opensandbox/sdk_e2e.py` on Linux and macOS.
-- `--listen-socket PATH` for `foil run`: the run may listen on that Unix
-  socket even under `--strict` (what `foil serve` uses).
-- `integrations/opensandbox/`: an image and demo for foil inside an
-  OpenSandbox sandbox, and a patch adding `runtime.type = "foil"` to
-  OpenSandbox's server (with OSEP-0025, a draft proposal).
-- `install.sh`: `FOIL_VERSION` picks a release; `FOIL_NO_SETUP=1` and
-  containers skip the AppArmor setup.
-- Licensed under Apache-2.0 alone (was MIT OR Apache-2.0; 0.3.0 and earlier
-  keep their license). Contributions need the [CLA](CLA.md), signed once by
-  comment on the first pull request.
-- Pull request and issue templates, and a code of conduct.
-
-## 0.4.0 — 2026-10-26
-
-macOS support.
+### macOS
 
 - Branches from APFS clones: a frozen `base` and the `tree` the command
   works in; diff, conflicts and commit are exact three-way comparisons; commit
@@ -47,7 +21,48 @@ macOS support.
 - `foil vm`: Linux foil in a Lima VM sharing only the folders you name.
 - `foil doctor` checks each of these for real; `tests/mac.rs` (19 tests).
 - CI on macOS (Apple silicon and Intel); releases add a universal macOS
-  binary; `install.sh` and Homebrew install it.
+  binary; `install.sh` and Homebrew install it
+  (`brew install ai-agentic-tools/tap/foil`).
+
+### OpenSandbox
+
+- `foil serve`: OpenSandbox's lifecycle API, with foil branches as
+  sandboxes; each sandbox runs `foil __execd` (OpenSandbox's execd API:
+  commands, sessions, files, metrics) inside one long-lived `foil run`, and
+  the server relays to it. Extra endpoints `diff`, `commit` and `logs`;
+  `networkPolicy` becomes `--strict` + `--allow-host`; sandboxes survive a
+  server restart; pause freezes the run's cgroup (stops its processes
+  without one, and on macOS). The unchanged OpenSandbox Python SDK passes
+  `integrations/opensandbox/sdk_e2e.py` on Linux and macOS.
+- `--listen-socket PATH` for `foil run`: the run may listen on that Unix
+  socket even under `--strict` (what `foil serve` uses).
+- `integrations/opensandbox/`: an image and demo for foil inside an
+  OpenSandbox sandbox, and a patch adding `runtime.type = "foil"` to
+  OpenSandbox's server (with OSEP-0025, a draft proposal).
+- `install.sh`: `FOIL_VERSION` picks a release; `FOIL_NO_SETUP=1` and
+  containers skip the AppArmor setup.
+
+### License and project
+
+- Licensed under Apache-2.0 alone (was MIT OR Apache-2.0; 0.3.0 and earlier
+  keep their license). Contributions need the [CLA](CLA.md), signed once by
+  comment on the first pull request.
+- Pull request and issue templates, and a code of conduct.
+
+### Fixes
+
+- Linux: the command, not foil, is the OOM killer's first choice
+  (`oom_score_adj` 1000, inherited by everything it starts). Under a tight
+  `--memory` the kernel could kill foil itself, so the run ended with no
+  message and no cleanup.
+
+### Packaging
+
+- rustls 0.23.46, which fixes four advisories in 0.23.45 (one medium: TLS
+  secrets in a session's `Debug` output).
+- On crates.io as `foil-sandbox` (`cargo install foil-sandbox`; the command
+  is still `foil`).
+- A Homebrew tap for macOS and Linux.
 
 ## 0.3.0 — 2026-10-24
 

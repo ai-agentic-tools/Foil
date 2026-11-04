@@ -1,15 +1,24 @@
 [package]
-name = "foil"
+name = "foil-sandbox"
 version = "0.4.0"
 edition = "2021"
 description = "A local sandbox for AI coding agents: instant copy-on-write branches of your repo, reviewed before they are committed"
 license = "Apache-2.0"
 repository = "https://github.com/ai-agentic-tools/foil"
+homepage = "https://ai-agentic-tools.github.io/Foil/"
 readme = "README.md"
 keywords = ["sandbox", "ai-agents", "claude-code", "copy-on-write", "llm"]
 categories = ["command-line-utilities", "development-tools", "filesystem"]
-# Distributed as release binaries; not on crates.io.
-publish = false
+# On crates.io as foil-sandbox (the name foil is taken); the library and the
+# command are still called foil.
+include = ["/src", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE", "/NOTICE", "/CHANGELOG.md"]
+
+[lib]
+name = "foil"
+
+[[bin]]
+name = "foil"
+path = "src/main.rs"
 
 [dependencies]
 libc = "0.2"

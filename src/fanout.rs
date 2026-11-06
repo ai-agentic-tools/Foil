@@ -160,7 +160,7 @@ pub fn pick(name: &str) -> io::Result<(usize, Vec<String>)> {
     })?;
     let chosen = Branch::open(name)?;
     let workspace = chosen.workspace.clone();
-    let applied = chosen.commit(false, false)?;
+    let applied = chosen.commit(false, false, false)?;
     let mut discarded = Vec::new();
     for b in Branch::list()? {
         if base_of(&b.name) == Some(base) && b.workspace == workspace {

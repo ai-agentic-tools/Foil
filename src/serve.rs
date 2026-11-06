@@ -570,13 +570,13 @@ impl Server {
                 }
                 let (changes, hidden) = branch.changes(all)?;
                 let changes: Vec<Value> =
-                    changes.iter().map(|c| json!({ "kind": c.kind.letter().to_string(), "path": c.path.to_string_lossy() })).collect();
+                    changes.iter().map(|c| json!({ "kind": c.kind.letter().to_string(), "path": c.path.to_string_lossy(), "guarded": c.guarded() })).collect();
                 reply(out, 200, json!({ "changes": changes, "ignored": hidden }))
             }
             ("POST", ["sandboxes", id, "commit"]) => {
                 let body = req.json(reader, MAX_BODY)?;
                 let flag = |name: &str| body.get(name).and_then(Value::as_bool).unwrap_or(false);
-                let applied = self.commit(id, flag("force"), flag("all"))?;
+                let applied = self.commit(id, flag("force"), flag("all"), flag("guarded"))?;
                 reply(out, 200, json!({ "applied": applied }))
             }
             ("GET", ["sandboxes", id, "logs"]) => {
@@ -920,7 +920,7 @@ impl Server {
     }
 
     /// Apply a sandbox's changes to its workspace; the sandbox ends with it.
-    fn commit(&self, id: &str, force: bool, all: bool) -> Result<usize, Error> {
+    fn commit(&self, id: &str, force: bool, all: bool, guarded: bool) -> Result<usize, Error> {
         let sandbox = self.get(id)?;
         if !matches!(sandbox.state, "Running" | "Paused" | "Failed") {
             return Err(Error::new(409, "INVALID_STATE", format!("sandbox {id} is {}", sandbox.state)));
@@ -942,7 +942,7 @@ impl Server {
             }
         }
         self.stop_run(&sandbox);
-        match Server::open_unlocked(&sandbox.branch).and_then(|b| b.commit(force, all)) {
+        match Server::open_unlocked(&sandbox.branch).and_then(|b| b.commit(force, all, guarded)) {
             Ok(applied) => {
                 self.sandboxes.lock().unwrap().remove(id);
                 self.forget(id);

@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.4.1 — 2026-11-05
+
+A security fix: an agent could get code run on your machine through a
+branch's git config or hooks. Upgrade if you commit agents' branches.
+
+### Security
+
+- **Git config and hooks.** A run could write `.git/config` (for example
+  `core.fsmonitor`, which git runs on every `git status`) or a hook in
+  `.git/hooks`, and `foil commit` applied them like any other change; git
+  then ran them on your machine, outside the sandbox, the next time you
+  used it. Commit now leaves out everything in a `.git` folder except
+  git's data (objects, refs, logs, the index, merge and rebase state), and
+  a new or replaced `.git`, and names what it left out. `foil diff` marks
+  them `[guarded]` (and `"guarded": true` in `--json` and `foil serve`'s
+  diff); `foil commit --guarded` (and `"guarded": true` in `foil serve`'s
+  commit) applies them after review. `foil pick` and `foil agent`'s commit
+  leave them out too.
+- **macOS: temp folders.** A strict run could read and write `/tmp`,
+  `/var/tmp` and your own temp folder, so it could read other programs'
+  temp files, leave files for them, and see other runs' files. A strict
+  run now gets a temp folder of its own (`TMPDIR`) and can't read or write
+  those, except files `mktemp` makes in your temp folder (macOS's `mktemp`
+  ignores `TMPDIR`), which it can open by their random names but not list.
+  Linux strict runs already had a private `/tmp`. `CLAUDE_CODE_TMPDIR`
+  points Claude Code there too (it uses `/tmp/claude-<uid>` otherwise).
+  A tool that insists on `/tmp` itself fails in a strict run on macOS.
+
 ## 0.4.0 — 2026-11-02
 
 macOS support, OpenSandbox compatibility, and a new license.

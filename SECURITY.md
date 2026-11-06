@@ -35,6 +35,7 @@ must not be able to:
 | Gain privileges (setuid) | `no_new_privs` | `cannot_gain_privileges` |
 | Reach local services or host sockets | network namespace; abstract sockets are per namespace | `cannot_reach_local_services_or_host_tmp`, `cannot_reach_host_abstract_unix_sockets` |
 | Trick a commit into writing outside the workspace | commit through open folder handles, never following symlinks | `commit_does_not_follow_a_symlink_the_branch_replaced` |
+| Get code run on your machine after commit (git config, hooks, a new `.git`) | `foil diff` marks them `[guarded]`; commit leaves them out unless `--guarded` | `commit_leaves_out_git_config_and_hooks_unless_asked` (`tests/branch.rs`) |
 | Outlive the run | cgroup box + subreaper + PID namespace; `--timeout` | `leftovers_inside_a_strict_run_end_with_it` |
 
 Without `--strict`, `--protect` only stops *writes* outside the branch;
@@ -60,6 +61,11 @@ reads are not restricted.
   foil's environment, the agent uses the login saved in its state folder
   (e.g. `~/.claude/.credentials.json`), which commands it runs can read;
   `foil agent` warns about this.
+- **Files that run later.** Commit guards what git runs by itself. Other
+  files an agent edits can run code when *you* use them: a `Makefile`, a
+  `package.json` script, `.envrc` (direnv asks first), `.vscode/tasks.json`
+  (VS Code asks first in an untrusted folder). Those are ordinary changes;
+  read them in `foil diff --patch` before you commit.
 - **What you allow, it gets.** `--allow-read`, `--allow-write` and
   `--allow-env` are passed through as asked; `foil agent` allows the
   agent's own state folder (e.g. `~/.claude`) so it can work.
@@ -71,7 +77,9 @@ reads are not restricted.
   run can still list other processes and reach Mach system services, shares
   the machine's loopback (only foil's proxy port is allowed, and the proxy
   wants a per-run token), and reads outside home folders and other volumes
-  are not hidden. Use `foil vm` for hostile code.
+  are not hidden. Since 0.4.1 it gets a temp folder of its own instead of
+  `/tmp` and your `TMPDIR` (`cannot_use_shared_temp_folders_with_strict`).
+  Use `foil vm` for hostile code.
 - **`foil serve`** checks `OPEN_SANDBOX_API_KEY` on the lifecycle API and a
   per-sandbox token (or the key) on the execd relay, both outside the
   sandboxes; neither reaches a sandbox (the key is removed from every

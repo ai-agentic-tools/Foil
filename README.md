@@ -124,6 +124,12 @@ agent, not an attacker with a kernel exploit.
   also changed in the real folder since the branch was made (say, by
   another agent's commit), naming each one; `--force` overrides. Commits
   into one folder take turns, so two agents can never both win.
+- **Nothing that runs on your machine slips through.** Git runs a
+  repository's config (`core.fsmonitor`, `core.hooksPath`, aliases) and its
+  hooks without asking. So `foil diff` marks changes to them, or a new
+  `.git`, as `[guarded]`, and commit leaves them out and says so, unless you
+  review them and pass `--guarded`. The agent's own git commits (objects,
+  refs, the index) are applied as usual.
 - **Crash-safe commit.** A commit records what it will do before it starts
   and syncs to disk before it deletes the branch. If foil is killed, the
   machine loses power or the disk fills half-way, run `foil commit NAME`
@@ -271,7 +277,7 @@ foil diff [--patch | --json] [--all] NAME
 foil fanout -n N [--check CMD] [--agent NAME] [--name BASE] [--pick] [--json] [run options] [--] ...
 foil pick NAME
 foil session [--] <command> [args...]
-foil commit [--force] [--all] NAME
+foil commit [--force] [--all] [--guarded] NAME
 foil abort [--force] NAME
 foil list [--json]
 foil serve [--listen ADDR] [-w DIR...] [run options]    OpenSandbox's API (below)
@@ -326,6 +332,13 @@ namespaces, overlayfs and cgroups:
 | `--protect`, `--strict`, `--no-network` | mount, PID, IPC and network namespaces | a Seatbelt profile (the sandbox Chrome, Codex and Claude Code use) |
 | Cleanup | a cgroup per run | every process carries the run's profile, so even detached ones are found and stopped |
 | Limits | `--memory`, `--cpus`, `--pids` | `--memory` as a watchdog; `--timeout` |
+
+A strict run gets its own temp folder (`TMPDIR`) and can't read or write
+`/tmp`, `/var/tmp` or your own temp folder, where other programs and other
+runs keep files; only files `mktemp` makes there (it ignores `TMPDIR` on
+macOS) can be opened, by their random names. A tool that insists on `/tmp`
+itself fails there; foil points Claude Code's own temp folder
+(`CLAUDE_CODE_TMPDIR`) at the run's.
 
 Weaker than Linux: a strict run can still see that other processes exist
 and reach macOS system services; tools that wrote absolute paths into the

@@ -54,7 +54,7 @@ usage: foil run [options] [--] <command> [args...]
                                what branch NAME changed (A added, M modified,
                                D deleted, R replaced), or the full patch;
                                paths .gitignore ignores only with --all
-       foil commit [--force] [--all] NAME
+       foil commit [--force] [--all] [--guarded] NAME
                                apply branch NAME to its workspace, then delete it;
                                refuses files changed there since, unless --force;
                                leaves out ignored paths (build output), unless --all
@@ -97,8 +97,10 @@ fn main() {
         }
         Some("pick") => {
             let (_, name) = flags_and_name(rest, &[]);
+            let held = Branch::open(&name).map(|b| held_back(&b, false)).unwrap_or_default();
             finish(foil::fanout::pick(&name).map(|(n, gone)| {
                 println!("applied {}; discarded {}", n_changes(n), if gone.is_empty() { "nothing".to_owned() } else { gone.join(", ") });
+                tell_held_back(&held);
             }))
         }
         // Internal: PID 1 of a strict run, and its network proxy.
@@ -119,11 +121,16 @@ fn main() {
         Some("serve") => serve(rest),
         Some("diff") => diff(rest),
         Some("commit") => {
-            let (flags, name) = flags_and_name(rest, &["--force", "--all"]);
+            let (flags, name) = flags_and_name(rest, &["--force", "--all", "--guarded"]);
             let force = flags.contains(&"--force");
             let all = flags.contains(&"--all");
-            finish(Branch::open(&name).and_then(|b| b.commit(force, all)).map(|n| {
+            let guarded = flags.contains(&"--guarded");
+            finish(Branch::open(&name).and_then(|b| {
+                let held = if guarded { Vec::new() } else { held_back(&b, all) };
+                let n = b.commit(force, all, guarded)?;
                 println!("applied {}", n_changes(n));
+                tell_held_back(&held);
+                Ok(())
             }))
         }
         Some("abort") => {
@@ -705,7 +712,7 @@ fn summarize(name: &str, termination: Termination) {
     }
     eprintln!("foil: branch {name} changed {} paths in {}:", changes.len(), branch.workspace.display());
     for change in changes.iter().take(15) {
-        eprintln!("  {} {}", change.kind.letter(), change.path.display());
+        eprintln!("  {} {}{}", change.kind.letter(), change.path.display(), guard_note(change));
     }
     if changes.len() > 15 {
         eprintln!("  ... and {} more", changes.len() - 15);
@@ -720,8 +727,11 @@ fn summarize(name: &str, termination: Termination) {
     let mut answer = String::new();
     let _ = std::io::stdin().read_line(&mut answer);
     match answer.trim() {
-        "c" | "commit" => match branch.commit(false, false) {
-            Ok(n) => eprintln!("foil: applied {}", n_changes(n)),
+        "c" | "commit" => match branch.commit(false, false, false) {
+            Ok(n) => {
+                eprintln!("foil: applied {}", n_changes(n));
+                tell_held_back(&changes.iter().filter(|c| c.guarded()).map(|c| c.path.clone()).collect::<Vec<_>>());
+            }
             Err(err) => eprintln!("foil: {err}"),
         },
         "a" | "abort" => match branch.abort(false) {
@@ -753,17 +763,21 @@ fn diff(args: Vec<OsString>) {
                     .iter()
                     .map(|c| {
                         format!(
-                            "{{\"kind\":\"{}\",\"path\":{}}}",
+                            "{{\"kind\":\"{}\",\"path\":{},\"guarded\":{}}}",
                             c.kind.letter(),
-                            json_string(&c.path.to_string_lossy())
+                            json_string(&c.path.to_string_lossy()),
+                            c.guarded()
                         )
                     })
                     .collect();
                 writeln!(out, "[{}]", items.join(","))
             }
             None => {
-                for change in changes {
-                    writeln!(out, "{} {}", change.kind.letter(), change.path.display())?;
+                for change in &changes {
+                    writeln!(out, "{} {}{}", change.kind.letter(), change.path.display(), guard_note(change))?;
+                }
+                if changes.iter().any(|c| c.guarded()) {
+                    eprintln!("foil: guarded paths are git config, hooks or a new .git, which git runs on your machine; commit leaves them out unless --guarded");
                 }
                 Ok(())
             }
@@ -816,6 +830,29 @@ fn flags_and_name(args: Vec<OsString>, allowed: &[&'static str]) -> (Vec<&'stati
 }
 
 /// "1 change", "3 changes".
+/// The guarded changes (see `Change::guarded`) a commit of `branch` leaves out.
+fn held_back(branch: &Branch, all: bool) -> Vec<std::path::PathBuf> {
+    let changes = branch.changes(all).map(|(c, _)| c).unwrap_or_default();
+    changes.into_iter().filter(|c| c.guarded()).map(|c| c.path).collect()
+}
+
+fn tell_held_back(paths: &[std::path::PathBuf]) {
+    if !paths.is_empty() {
+        let list: Vec<String> = paths.iter().map(|p| format!("  {}", p.display())).collect();
+        eprintln!(
+            "foil: left out {} that git would run on your machine (git config, hooks or a new .git), \
+             discarded with the branch:\n{}\nto apply such changes, review them first, then commit with --guarded",
+            if paths.len() == 1 { "1 path".to_owned() } else { format!("{} paths", paths.len()) },
+            list.join("\n")
+        );
+    }
+}
+
+/// How `foil diff` marks a guarded change.
+fn guard_note(change: &foil::change::Change) -> &'static str {
+    if change.guarded() { "  [guarded]" } else { "" }
+}
+
 fn n_changes(n: usize) -> String {
     format!("{n} change{}", if n == 1 { "" } else { "s" })
 }

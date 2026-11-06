@@ -796,7 +796,7 @@ index 0000000..d92b41d
 +        events = httpx.post(f"http://{endpoint.endpoint}/command", headers=endpoint.headers, json={"command": "echo new > a.txt"})
 +        assert events.status_code == 200
 +        assert (workspace / "a.txt").read_text() == "old\n"
-+        assert service.get_diff(created.id)["changes"] == [{"kind": "M", "path": "a.txt"}]
++        assert service.get_diff(created.id)["changes"] == [{"kind": "M", "path": "a.txt", "guarded": False}]
 +        assert service.commit(created.id)["applied"] == 1
 +        assert (workspace / "a.txt").read_text() == "new\n"
 +        with pytest.raises(HTTPException) as err:

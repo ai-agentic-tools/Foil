@@ -17,7 +17,7 @@
 {"@context": "https://schema.org", "@type": "SoftwareApplication", "name": "Foil",
  "description": "A local sandbox for AI coding agents: instant copy-on-write branches of your repo, reviewed before they are committed.",
  "applicationCategory": "DeveloperApplication", "operatingSystem": "Linux, macOS",
- "license": "https://www.apache.org/licenses/LICENSE-2.0", "softwareVersion": "0.4.0",
+ "license": "https://www.apache.org/licenses/LICENSE-2.0", "softwareVersion": "0.4.1",
  "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"},
  "codeRepository": "https://github.com/ai-agentic-tools/Foil",
  "url": "https://ai-agentic-tools.github.io/Foil/"}
@@ -43,7 +43,7 @@
   <h2>What it does</h2>
   <div class="grid">
     <div class="card"><h3>A branch in ~25 ms</h3><p>Any repo size. Nothing is copied until it is written, untracked files and build state included. On a 1 GB repo, <code>cp -a</code> takes 1.9 s.</p></div>
-    <div class="card"><h3>Review, then commit</h3><p><code>foil diff --patch</code> shows exactly what changed. <code>foil commit</code> applies it, refusing files that changed under it; <code>foil abort</code> throws it away.</p></div>
+    <div class="card"><h3>Review, then commit</h3><p><code>foil diff --patch</code> shows exactly what changed. <code>foil commit</code> applies it, refusing files that changed under it and holding back git config and hooks (<a href="blog/git-config-escape.html">why</a>); <code>foil abort</code> throws it away.</p></div>
     <div class="card"><h3>Secrets stay hidden</h3><p><code>--strict</code> hides <code>~/.ssh</code>, tokens and other repos. The agent never sees its API key: foil's proxy adds it on the way out.</p></div>
     <div class="card"><h3>Network allow-list</h3><p>Only the hosts you name, e.g. <code>--allow-host pypi.org</code>. Everything else gets 403.</p></div>
     <div class="card"><h3>Many agents at once</h3><p><code>foil fanout -n 3 --check "make test"</code> runs attempts in parallel branches and keeps the best passing one.</p></div>

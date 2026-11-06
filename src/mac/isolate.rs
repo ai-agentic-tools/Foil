@@ -56,7 +56,11 @@ const BASIC_ENV: [&str; 17] = [
     "FORCE_COLOR", "COLUMNS", "LINES", "EDITOR", "TMPDIR", "__CF_USER_TEXT_ENCODING",
 ];
 
-/// Paths a write-restricted run may still write: temp folders and devices.
+/// The shared temp folders a `--protect` run may write. A strict run may
+/// neither read nor write them, nor the user's own temp folder (`TMPDIR`):
+/// other programs and other runs keep files there. It gets its own instead,
+/// plus the files `mktemp` makes in the user's one (macOS's `mktemp` ignores
+/// `TMPDIR`): those it can open by their random names but not list.
 const SCRATCH: [&str; 2] = ["/private/tmp", "/private/var/tmp"];
 
 /// A branch as a run sees it: the real folder, the clone the command works
@@ -77,7 +81,8 @@ pub struct Plan {
     pub marker: Marker,
     pub cwd: Option<PathBuf>,
     env: Option<Vec<(OsString, OsString)>>,
-    /// A private home made for this run only (removed afterwards).
+    /// A private home made for this run only (removed afterwards, with its
+    /// temp folder beside it).
     pub scratch_home: Option<PathBuf>,
     /// `--memory`: the watchdog stops the run past this many bytes.
     pub memory: Option<u64>,
@@ -153,24 +158,32 @@ impl Plan {
                     }
                 }
             }
+            // And its own temp folder, beside the home so the home stays empty.
+            std::fs::create_dir_all(home.with_extension("tmp"))?;
             Some(home)
         } else {
             None
         };
+        let private_tmp = private_home.as_ref().map(|h| h.with_extension("tmp"));
 
         if options.protect || options.strict {
             p.push_str("(deny file-write*)\n(allow file-write*\n");
             if let Some(o) = &overlay {
                 p.push_str(&format!("  (subpath {})\n", quote(&o.tree)));
             }
-            for s in SCRATCH {
-                p.push_str(&format!("  (subpath {})\n", quote(Path::new(s))));
+            if !options.strict {
+                for s in SCRATCH {
+                    p.push_str(&format!("  (subpath {})\n", quote(Path::new(s))));
+                }
+                if let Some(tmp) = host_tmpdir() {
+                    p.push_str(&format!("  (subpath {})\n", quote(&tmp)));
+                }
             }
-            if let Some(tmp) = std::env::var_os("TMPDIR").map(PathBuf::from).and_then(|t| t.canonicalize().ok()) {
-                p.push_str(&format!("  (subpath {})\n", quote(&tmp)));
+            for own in private_home.iter().chain(&private_tmp) {
+                p.push_str(&format!("  (subpath {})\n", quote(&own.canonicalize()?)));
             }
-            if let Some(home) = &private_home {
-                p.push_str(&format!("  (subpath {})\n", quote(&home.canonicalize()?)));
+            if let Some(made) = options.strict.then(mktemp_files).flatten() {
+                p.push_str(&format!("  {made}\n"));
             }
             for path in &allow_write {
                 p.push_str(&format!("  (subpath {})\n", quote(path)));
@@ -184,6 +197,12 @@ impl Plan {
             // the run needs. Folders above an allowed path may be looked at
             // (not listed), so paths to it resolve.
             p.push_str("(deny file-read* (subpath \"/Users\") (subpath \"/Volumes\") (subpath \"/private/var/root\"))\n");
+            for s in SCRATCH {
+                p.push_str(&format!("(deny file-read* (subpath {}))\n", quote(Path::new(s))));
+            }
+            if let Some(tmp) = host_tmpdir() {
+                p.push_str(&format!("(deny file-read* (subpath {}))\n", quote(&tmp)));
+            }
             if let Some(home) = real_home.as_ref().and_then(|h| h.canonicalize().ok()) {
                 p.push_str(&format!("(deny file-read* (subpath {}))\n", quote(&home)));
             }
@@ -194,8 +213,8 @@ impl Plan {
             }
             readable.extend(allow_read.iter().cloned());
             readable.extend(allow_write.iter().cloned());
-            if let Some(home) = &private_home {
-                readable.push(home.canonicalize()?);
+            for own in private_home.iter().chain(&private_tmp) {
+                readable.push(own.canonicalize()?);
             }
             // Tools on PATH that live under a home folder (~/.cargo/bin, ~/.local/bin).
             if let Some(path) = std::env::var_os("PATH") {
@@ -205,8 +224,13 @@ impl Plan {
             for path in &readable {
                 p.push_str(&format!("  (subpath {})\n", quote(path)));
             }
+            if let Some(made) = mktemp_files() {
+                p.push_str(&format!("  {made}\n"));
+            }
             p.push_str(")\n(allow file-read-metadata\n");
-            let mut ancestors: Vec<&Path> = readable.iter().flat_map(|r| r.ancestors().skip(1)).collect();
+            // `mktemp` checks its folder before making a file in it.
+            let tmp = host_tmpdir();
+            let mut ancestors: Vec<&Path> = readable.iter().flat_map(|r| r.ancestors().skip(1)).chain(tmp.as_deref()).collect();
             ancestors.sort();
             ancestors.dedup();
             for a in ancestors {
@@ -253,6 +277,12 @@ impl Plan {
                 .collect();
             if let Some(home) = &private_home {
                 env.push(("HOME".into(), home.clone().into()));
+                // Its own temp folder. Claude Code uses /tmp/claude-<uid>
+                // unless told otherwise, and a strict run can't use /tmp.
+                let tmp = home.with_extension("tmp");
+                env.retain(|(k, _)| k != "TMPDIR" && k != "CLAUDE_CODE_TMPDIR");
+                env.push(("TMPDIR".into(), tmp.clone().into()));
+                env.push(("CLAUDE_CODE_TMPDIR".into(), tmp.into()));
             }
             for (k, v) in &options.setenv {
                 env.retain(|(name, _)| name != k.as_str());
@@ -289,8 +319,28 @@ impl Plan {
         self.marker.remove();
         if let Some(home) = &self.scratch_home {
             let _ = std::fs::remove_dir_all(home);
+            let _ = std::fs::remove_dir_all(home.with_extension("tmp"));
         }
     }
+}
+
+/// The user's own temp folder (`TMPDIR`, under `/private/var/folders`).
+fn host_tmpdir() -> Option<PathBuf> {
+    std::env::var_os("TMPDIR").map(PathBuf::from).and_then(|t| t.canonicalize().ok())
+}
+
+/// A Seatbelt filter for what `mktemp` makes in the user's temp folder:
+/// `tmp.` and a random suffix, and anything inside one made with `-d`.
+fn mktemp_files() -> Option<String> {
+    let tmp = host_tmpdir()?;
+    let mut re = String::from("^");
+    for c in tmp.to_str()?.chars() {
+        if !(c.is_ascii_alphanumeric() || c == '/' || c == '_' || c == '-') {
+            re.push('\\');
+        }
+        re.push(c);
+    }
+    Some(format!("(regex #\"{re}/tmp\\.[^/]+(/|$)\")"))
 }
 
 /// `path` as a Seatbelt string literal.
@@ -324,6 +374,13 @@ fn invalid(msg: String) -> io::Error {
 mod tests {
     use super::quote;
     use std::path::Path;
+
+    #[test]
+    fn mktemp_filter_escapes_the_folder() {
+        std::env::set_var("TMPDIR", "/private/tmp");
+        let made = super::mktemp_files().unwrap();
+        assert_eq!(made, r#"(regex #"^/private/tmp/tmp\.[^/]+(/|$)")"#);
+    }
 
     #[test]
     fn quoting() {

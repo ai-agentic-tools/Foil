@@ -257,6 +257,57 @@ fn cannot_read_secrets_with_strict() {
 }
 
 #[test]
+fn cannot_plant_git_config_or_hooks_through_a_commit() {
+    // Git runs its config and hooks on the host, so an agent must not be
+    // able to plant them by having its branch committed.
+    let env = Env::new("guarded");
+    let git = |args: &[&str]| {
+        let ok = Command::new("git").args(args).current_dir(env.root.join("home/ws")).env("GIT_CONFIG_GLOBAL", "/dev/null").status().unwrap().success();
+        assert!(ok, "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    let config = std::fs::read_to_string(env.root.join("home/ws").join(".git/config")).unwrap();
+    let plant = "printf '[core]\\n\\tfsmonitor = \"touch planted\"\\n' >> .git/config; \
+                 mkdir -p .git/hooks; printf '#!/bin/sh\\ntouch planted\\n' > .git/hooks/post-checkout; echo changed > a.txt";
+    assert!(env.run(&["-b", "t", "--strict"], plant).status.success());
+
+    let diff = text(&env.foil(&["diff", "t"]).stdout);
+    assert!(diff.contains("M .git/config  [guarded]") && diff.contains(".git/hooks/post-checkout  [guarded]"), "{diff}");
+    assert!(diff.contains("M a.txt\n"), "{diff}");
+    let commit = env.foil(&["commit", "t"]);
+    assert!(commit.status.success(), "{}", text(&commit.stderr));
+    assert!(text(&commit.stderr).contains("left out 2 paths"), "{}", text(&commit.stderr));
+    assert_eq!(std::fs::read_to_string(env.root.join("home/ws").join(".git/config")).unwrap(), config, "the planted config reached the workspace");
+    assert!(!env.root.join("home/ws").join(".git/hooks/post-checkout").exists(), "the planted hook reached the workspace");
+    assert_eq!(std::fs::read_to_string(env.root.join("home/ws").join("a.txt")).unwrap(), "changed\n");
+
+    // Asked for, they are applied.
+    assert!(env.run(&["-b", "t", "--strict"], plant).status.success());
+    assert!(env.foil(&["commit", "--guarded", "t"]).status.success());
+    assert!(env.root.join("home/ws").join(".git/hooks/post-checkout").exists());
+}
+
+#[test]
+fn cannot_use_shared_temp_folders_with_strict() {
+    // /tmp and the user's TMPDIR hold other programs' and other runs' files.
+    let env = Env::new("strict-tmp");
+    let probe = format!("/private/tmp/foil-probe-{}", std::process::id());
+    let host_tmp = std::env::temp_dir();
+    let script = format!(
+        "touch '{probe}' 2>/dev/null && echo wrote-tmp; ls /private/tmp >/dev/null 2>&1 && echo listed-tmp; \
+         ls '{}' >/dev/null 2>&1 && echo listed-tmpdir; \
+         case \"$TMPDIR\" in *.tmp) echo own-tmpdir;; esac; \
+         [ \"$CLAUDE_CODE_TMPDIR\" = \"$TMPDIR\" ] && echo claude-too; \
+         f=$(mktemp) && echo ok > \"$f\" && cat \"$f\" && rm \"$f\"; \
+         python3 -c 'import tempfile; tempfile.mkstemp(); print(\"py-ok\")'",
+        host_tmp.display()
+    );
+    let out = env.run(&["-b", "t", "--strict"], &script);
+    let _ = std::fs::remove_file(&probe);
+    assert_eq!(text(&out.stdout), "own-tmpdir\nclaude-too\nok\npy-ok\n", "{}", text(&out.stderr));
+}
+
+#[test]
 fn cannot_see_environment_secrets_with_strict() {
     let env = Env::new("strict-env");
     let out = env.cmd(&["run", "--strict", "--allow-env", "SHOWN", "--", "sh", "-c", "echo ${SECRET:-none} ${SHOWN:-none}"])

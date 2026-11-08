@@ -449,6 +449,8 @@ fn ignored_build_output_is_left_out_of_diff_and_commit_unless_all() {
 /// and a file changed just before the branch carries a later stamp. That
 /// file, unchanged since, is no conflict; a file changed after the branch
 /// still is. (Test builds can force the fallback.)
+// Linux only: macOS finds conflicts by comparing content, not times.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_file_changed_just_before_the_branch_is_no_conflict_even_on_a_lagging_clock() {
     if !branches_available() {
@@ -483,6 +485,8 @@ fn a_file_changed_just_before_the_branch_is_no_conflict_even_on_a_lagging_clock(
 /// after the branch can carry an earlier time than the branch. Then files
 /// changed that long before the branch count as changed since: refusing is
 /// the safe mistake. (Test builds can pretend the clock was set back.)
+// Linux only: macOS finds conflicts by comparing content, not times.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_clock_set_back_widens_the_conflict_check_instead_of_missing_changes() {
     if !branches_available() {

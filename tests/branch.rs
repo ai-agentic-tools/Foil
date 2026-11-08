@@ -112,6 +112,40 @@ fn diff_lists_added_modified_and_deleted_files() {
 }
 
 #[test]
+fn commit_leaves_out_git_config_and_hooks_unless_asked() {
+    // Git runs its config and hooks on the host, so an agent must not be
+    // able to plant them by having its branch committed.
+    if !branches_available() {
+        return;
+    }
+    let env = Env::new("guarded");
+    let git = |args: &[&str]| {
+        let ok = Command::new("git").args(args).current_dir(env.ws()).env("GIT_CONFIG_GLOBAL", "/dev/null").status().unwrap().success();
+        assert!(ok, "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    let config = std::fs::read_to_string(env.ws().join(".git/config")).unwrap();
+    let plant = "printf '[core]\\n\\tfsmonitor = \"touch planted\"\\n' >> .git/config; \
+                 mkdir -p .git/hooks; printf '#!/bin/sh\\ntouch planted\\n' > .git/hooks/post-checkout; echo changed > a.txt";
+    assert!(env.run("t", plant).status.success());
+
+    let diff = text(&env.foil(&["diff", "t"]).output().unwrap().stdout);
+    assert!(diff.contains("M .git/config  [guarded]") && diff.contains(".git/hooks/post-checkout  [guarded]"), "{diff}");
+    assert!(diff.contains("M a.txt\n"), "{diff}");
+    let commit = env.foil(&["commit", "t"]).output().unwrap();
+    assert!(commit.status.success(), "{}", text(&commit.stderr));
+    assert!(text(&commit.stderr).contains("left out 2 paths"), "{}", text(&commit.stderr));
+    assert_eq!(std::fs::read_to_string(env.ws().join(".git/config")).unwrap(), config, "the planted config reached the workspace");
+    assert!(!env.ws().join(".git/hooks/post-checkout").exists(), "the planted hook reached the workspace");
+    assert_eq!(std::fs::read_to_string(env.ws().join("a.txt")).unwrap(), "changed\n");
+
+    // Asked for, they are applied.
+    assert!(env.run("t", plant).status.success());
+    assert!(env.foil(&["commit", "--guarded", "t"]).output().unwrap().status.success());
+    assert!(env.ws().join(".git/hooks/post-checkout").exists());
+}
+
+#[test]
 fn commit_applies_the_changes_and_removes_the_branch() {
     if !branches_available() {
         return;
@@ -287,7 +321,8 @@ fn diff_shows_a_patch_and_json() {
     }
     assert_eq!(
         json,
-        "[{\"kind\":\"M\",\"path\":\"a.txt\"},{\"kind\":\"A\",\"path\":\"b.txt\"},{\"kind\":\"D\",\"path\":\"c.txt\"}]\n"
+        "[{\"kind\":\"M\",\"path\":\"a.txt\",\"guarded\":false},{\"kind\":\"A\",\"path\":\"b.txt\",\"guarded\":false},\
+         {\"kind\":\"D\",\"path\":\"c.txt\",\"guarded\":false}]\n"
     );
 }
 

@@ -272,8 +272,9 @@ impl Branch {
 
     /// Apply the branch to its workspace, then delete it (see the module
     /// comment). Refuses conflicting changes unless `force`; leaves out
-    /// ignored paths unless `all`. Returns the number of changes applied.
-    pub fn commit(self, force: bool, all: bool) -> io::Result<usize> {
+    /// ignored paths unless `all`, and guarded ones (see `Change::guarded`)
+    /// unless `guarded`. Returns the number of changes applied.
+    pub fn commit(self, force: bool, all: bool, guarded: bool) -> io::Result<usize> {
         let lock = self.lock()?;
         let _workspace = self.workspace_lock()?;
         let access = Access::new(Some(lock), &self.name);
@@ -281,7 +282,12 @@ impl Branch {
         let plan = match fs::read(&journal) {
             Ok(raw) => read_journal(&raw)?,
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                let plan = self.changes_with(all, &access)?.0;
+                let mut plan = self.changes_with(all, &access)?.0;
+                if !guarded {
+                    // With everything in them: a new `.git` holds data too.
+                    let held: Vec<PathBuf> = plan.iter().filter(|c| c.guarded()).map(|c| c.path.clone()).collect();
+                    plan.retain(|c| !held.iter().any(|h| c.path.starts_with(h)));
+                }
                 if !force {
                     let conflicts = self.conflicts_in(&plan, &access)?;
                     if !conflicts.is_empty() {

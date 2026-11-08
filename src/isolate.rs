@@ -59,6 +59,9 @@ pub struct Options {
     /// Unix sockets the run may create and listen on (`foil serve`'s execd);
     /// their folders are in `allow_write`, so the socket is the host's too.
     pub listen: Vec<PathBuf>,
+    /// `--hide`: paths in the workspace a strict run may neither read nor
+    /// write (absolute, in the real workspace; never symlinks).
+    pub hide: Vec<PathBuf>,
 }
 
 /// Variables a strict run keeps from foil's environment; everything else
@@ -134,6 +137,9 @@ impl Plan {
         if !options.allow_read.is_empty() && !options.strict {
             return Err(invalid("--allow-read only makes sense with --strict".to_owned()));
         }
+        if !options.hide.is_empty() && !options.strict {
+            return Err(invalid("--hide only makes sense with --strict".to_owned()));
+        }
         if overlay.is_none() && !options.protect && !options.no_network && !options.strict {
             return Ok(None);
         }
@@ -186,6 +192,7 @@ impl Plan {
             allow_write: &options.allow_write,
             proxy_dir: options.proxy_dir.as_deref(),
             home,
+            hide: &options.hide,
         })?;
         let mut env: Vec<(OsString, OsString)> = std::env::vars_os()
             .filter(|(k, _)| {

@@ -11,11 +11,13 @@ compile_error!("foil runs on Linux and macOS");
 
 pub mod agent;
 pub mod at;
+pub mod audit;
 pub mod change;
 pub mod execd;
 pub mod fanout;
 pub mod gitignore;
 pub mod http;
+pub mod policy;
 pub mod proxy;
 pub mod serve;
 pub mod units;

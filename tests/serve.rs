@@ -127,7 +127,7 @@ fn sandboxes_run_commands_and_commit_back() {
 
     let (status, diff) = serve.api("GET", &format!("/sandboxes/{id}/diff"), None);
     assert_eq!(status, 200);
-    assert_eq!(diff["changes"], json!([{ "kind": "M", "path": "a.txt" }, { "kind": "A", "path": "b.txt" }]));
+    assert_eq!(diff["changes"], json!([{ "kind": "M", "path": "a.txt", "guarded": false }, { "kind": "A", "path": "b.txt", "guarded": false }]));
 
     let (status, applied) = serve.api("POST", &format!("/sandboxes/{id}/commit"), Some(&json!({})));
     assert_eq!(status, 200, "{applied}");

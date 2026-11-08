@@ -239,6 +239,21 @@ struct Config {
     /// macOS: what every request must carry (see the module comment).
     token: Option<String>,
     tls: Arc<rustls::ClientConfig>,
+    /// `--audit`: where every request is recorded, allowed or not.
+    audit: Option<crate::audit::Log>,
+}
+
+impl Config {
+    /// Record a request to `host:port`: `verdict` is allowed or blocked.
+    fn record(&self, method: &str, host: &str, port: u16, verdict: &str, reason: Option<&str>) {
+        if let Some(log) = &self.audit {
+            let mut fields = serde_json::json!({"method": method, "host": host, "port": port, "verdict": verdict});
+            if let Some(reason) = reason {
+                fields["reason"] = reason.into();
+            }
+            log.event("net", fields);
+        }
+    }
 }
 
 /// A client connection: a Unix socket (Linux) or loopback TCP (macOS).
@@ -279,12 +294,19 @@ pub fn main(argv: &[OsString]) -> ! {
         eprintln!("foil __proxy: no socket");
         std::process::exit(2)
     };
-    let (mut allow, mut inject, mut ready, mut token) = (Vec::new(), Vec::new(), None, None);
+    let (mut allow, mut inject, mut ready, mut token, mut audit) = (Vec::new(), Vec::new(), None, None, None);
     while let Some(flag) = args.next() {
         match (flag.as_str(), args.next()) {
             ("--allow", Some(v)) => allow.push(v),
             ("--inject", Some(v)) => inject.push(v),
             ("--token", Some(v)) => token = Some(v),
+            ("--audit", Some(v)) => match crate::audit::Log::open(Path::new(&v)) {
+                Ok(log) => audit = Some(log),
+                Err(err) => {
+                    eprintln!("foil: audit log {v}: {err}");
+                    std::process::exit(1)
+                }
+            },
             ("--ready-fd", Some(v)) if v.parse::<i32>().is_ok() => ready = v.parse::<i32>().ok(),
             _ => {
                 eprintln!("foil __proxy: bad arguments");
@@ -298,7 +320,7 @@ pub fn main(argv: &[OsString]) -> ! {
         .expect("ring supports the default TLS versions")
         .with_root_certificates(roots)
         .with_no_client_auth();
-    let config = Arc::new(Config { allow, inject, token, tls: Arc::new(tls) });
+    let config = Arc::new(Config { allow, inject, token, tls: Arc::new(tls), audit });
     exit_with_parent();
     // Tell foil where we listen ("ready" or the TCP port), once we do.
     let report = |what: String| {
@@ -406,7 +428,7 @@ pub const READY_FD: i32 = 3;
 /// Start `foil __proxy`: on Linux on a socket in a fresh private folder, on
 /// macOS on a loopback port with a fresh token. Returns once it accepts
 /// connections.
-pub fn start(allow: &[String], inject: &[String]) -> io::Result<Running> {
+pub fn start(allow: &[String], inject: &[String], audit: Option<&Path>) -> io::Result<Running> {
     use std::os::unix::process::CommandExt;
     let mut cmd = Command::new(std::env::current_exe()?);
     cmd.arg("__proxy").stdin(Stdio::null());
@@ -428,6 +450,9 @@ pub fn start(allow: &[String], inject: &[String]) -> io::Result<Running> {
     }
     for name in inject {
         cmd.args(["--inject", name]);
+    }
+    if let Some(path) = audit {
+        cmd.arg("--audit").arg(path);
     }
     // The proxy writes one line to this pipe once it listens (or exits,
     // which closes it): waiting on it costs no polling delay.
@@ -595,15 +620,18 @@ fn handle<C: Conn>(conn: C, config: &Config) -> io::Result<()> {
     if head.method.eq_ignore_ascii_case("CONNECT") {
         let (host, port) = split_host_port(&head.target, 443);
         if !allowed(&config.allow, &host, port) {
+            config.record("CONNECT", &host, port, "blocked", Some(NOT_ALLOWED));
             return deny(&mut client, &host, port);
         }
         let upstream = match connect_allowed(&config.allow, &host, port) {
             Ok(upstream) => upstream,
             Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+                config.record("CONNECT", &host, port, "blocked", Some(INTERNAL));
                 return respond(&mut client, 403, "blocked by foil: internal address");
             }
             Err(err) => return respond(&mut client, 502, &format!("foil proxy: {host}:{port}: {err}")),
         };
+        config.record("CONNECT", &host, port, "allowed", None);
         client.set_timeout(None)?;
         client.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")?;
         // Anything the client sent after the head (rare) goes first.
@@ -616,7 +644,18 @@ fn handle<C: Conn>(conn: C, config: &Config) -> io::Result<()> {
         }
         let (name, path) = rest.split_once('/').map_or((rest, "/".to_owned()), |(n, p)| (n, format!("/{p}")));
         return match provider(name).filter(|p| config.inject.iter().any(|n| n == p.name)) {
-            Some(p) => inject(&mut reader, &mut client, &head, p, &path, config),
+            Some(p) => {
+                if let Some(log) = &config.audit {
+                    let host = split_host_port(p.url.trim_start_matches("https://").split('/').next().unwrap_or(""), 443);
+                    let path_only = path.split('?').next().unwrap_or("/");
+                    log.event(
+                        "net",
+                        serde_json::json!({"method": head.method, "host": host.0, "port": host.1, "verdict": "allowed",
+                                           "key_added": p.name, "path": path_only}),
+                    );
+                }
+                inject(&mut reader, &mut client, &head, p, &path, config)
+            }
             None => respond(&mut client, 404, "no such injected API"),
         };
     }
@@ -624,15 +663,18 @@ fn handle<C: Conn>(conn: C, config: &Config) -> io::Result<()> {
         let (authority, path) = rest.split_once('/').map_or((rest, "/".to_owned()), |(a, p)| (a, format!("/{p}")));
         let (host, port) = split_host_port(authority, 80);
         if !allowed(&config.allow, &host, port) {
+            config.record(&head.method, &host, port, "blocked", Some(NOT_ALLOWED));
             return deny(&mut client, &host, port);
         }
         let mut upstream = match connect_allowed(&config.allow, &host, port) {
             Ok(upstream) => upstream,
             Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+                config.record(&head.method, &host, port, "blocked", Some(INTERNAL));
                 return respond(&mut client, 403, "blocked by foil: internal address");
             }
             Err(err) => return respond(&mut client, 502, &format!("foil proxy: {host}:{port}: {err}")),
         };
+        config.record(&head.method, &host, port, "allowed", None);
         upstream.write_all(&rebuild(&head, &path, authority, &[], None))?;
         copy_body(&mut reader, &head.headers, &mut upstream)?;
         client.set_timeout(None)?;
@@ -791,6 +833,10 @@ fn split_host_port(authority: &str, default: u16) -> (String, u16) {
         _ => (authority.to_owned(), default),
     }
 }
+
+/// Why the audit log says a request was blocked.
+const NOT_ALLOWED: &str = "not in the allowlist";
+const INTERNAL: &str = "resolves to an address of this machine or its network";
 
 fn deny(client: &mut impl Write, host: &str, port: u16) -> io::Result<()> {
     eprintln!("foil: blocked network access to {host}:{port} (not in --allow-host)");

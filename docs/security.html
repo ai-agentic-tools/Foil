@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Foil for security teams: guardrails for AI coding agents</title>
+<meta name="description" content="What Foil guarantees when developers run Claude Code, Codex or other coding agents: hidden secrets, a network allowlist, a reviewed policy file, an audit log, held-back hooks. The threat model, the tests behind each claim, and a rollout plan.">
+<link rel="canonical" href="https://ai-agentic-tools.github.io/Foil/security.html">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Foil for security teams: guardrails for AI coding agents">
+<meta property="og:description" content="Your developers already run coding agents as themselves. Here is what Foil stops, how each claim is tested, and how to roll it out.">
+<meta property="og:url" content="https://ai-agentic-tools.github.io/Foil/security.html">
+<meta property="og:image" content="https://raw.githubusercontent.com/ai-agentic-tools/Foil/main/.github/social-preview.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <a class="brand" href="./">foil</a>
+  <nav><a href="./">Home</a><a href="blog/agent-guardrails.html">Blog</a><a href="https://github.com/ai-agentic-tools/Foil/blob/main/SECURITY.md">Threat model</a><a href="https://github.com/ai-agentic-tools/Foil">GitHub</a></nav>
+</header>
+<main>
+<article>
+  <h1>Foil for security teams</h1>
+  <p class="lead">Your developers already run coding agents. Those agents run as the developer: same files, same credentials, same network. Foil gives each session a boundary you can specify, review and audit, without taking the agent away from them.</p>
+
+  <h2>The problem, concretely</h2>
+  <p>A coding agent with a shell can do anything its user can. Usually it does what it was asked. The risk is the session where it doesn't: a prompt injection in an issue, a README or a dependency; a confused plan; a tool that runs further than intended. In that session, without a boundary, the agent can:</p>
+  <ul>
+    <li>read <code>~/.ssh</code>, <code>~/.aws/credentials</code>, <code>~/.config/gcloud</code>, browser profiles and other repositories;</li>
+    <li>read the <code>.env</code>, keys and service-account files that sit inside the repository it was asked to work on;</li>
+    <li>send any of it to any host, including through its own model API, and read its own API key from its environment;</li>
+    <li>leave something behind that runs <em>outside</em> any sandbox later: a git hook, <code>core.fsmonitor</code> in <code>.git/config</code>, a hook in <code>.claude/settings.json</code>, a new MCP server in <code>.mcp.json</code>, a VS Code task;</li>
+    <li>change files directly in the developer's checkout, with no review step between the agent and the code.</li>
+  </ul>
+  <p>Permission prompts in the agent itself help, but they are per tool, per agent and per developer, and they are easy to click through. Foil enforces the boundary outside the agent, the same for every agent.</p>
+
+  <h2>What Foil enforces</h2>
+  <p>In a strict session (<code>foil agent claude</code>, or any command with <code>foil run --strict</code>). Each row is an automated test that tries to break it; CI runs them on every change on Ubuntu 22.04 and 24.04 and on macOS; releases are also checked on kernels up to 7.0, Fedora with SELinux, AlmaLinux and Debian.</p>
+  <div class="table-wrap"><table>
+    <tr><th>The agent can't</th><th>Mechanism (Linux)</th><th>Test</th></tr>
+    <tr><td>read the home folder, other repos, system secrets</td><td>a private root: system folders read-only, the workspace, allowed paths; nothing else exists</td><td><code>cannot_read_secrets_or_other_folders</code></td></tr>
+    <tr><td>read secrets inside the repo</td><td><code>hide</code>: <code>/dev/null</code> on a <code>nodev</code> mount over a file, an empty read-only tmpfs over a folder, locked to the run's user namespace</td><td><code>cannot_read_hidden_files_even_by_renaming_their_folder</code></td></tr>
+    <tr><td>see its API key or your environment</td><td>the key is added by a proxy outside the sandbox; the environment is an allowlist</td><td><code>cannot_find_the_key_anywhere_in_proc</code></td></tr>
+    <tr><td>reach hosts you didn't allow, or internal addresses</td><td>an empty network namespace; the only way out is foil's allowlist proxy, which refuses internal addresses and DNS rebinding</td><td><code>cannot_reach_hosts_outside_the_allowlist</code>, <code>cannot_reach_this_machine_through_a_wildcard</code></td></tr>
+    <tr><td>change the real checkout before review</td><td>a copy-on-write branch (overlayfs; APFS clones on macOS); commit refuses conflicting files</td><td><code>cannot_write_outside_the_branch</code></td></tr>
+    <tr><td>plant code that runs outside later</td><td>commit holds back git config and hooks, <code>.claude/settings*.json</code>, <code>.claude/hooks/</code>, <code>.mcp.json</code>, <code>.vscode/tasks.json</code>, <code>.husky/</code> unless <code>--guarded</code></td><td><code>commit_leaves_out_git_config_and_hooks_unless_asked</code>, <code>files_other_tools_run_are_guarded</code></td></tr>
+    <tr><td>widen its own policy</td><td>changes to <code>.foil/</code> are held back the same way</td><td><code>a_policy_applies_and_an_agent_cannot_widen_it</code></td></tr>
+    <tr><td>read or rewrite its audit log</td><td>the log lives in foil's store, outside the view; written by foil and the proxy from outside</td><td><code>the_audit_log_records_every_request_and_the_outcome</code></td></tr>
+    <tr><td>see or signal other processes, gain privileges, outlive the session</td><td>PID and IPC namespaces, <code>no_new_privs</code>, a cgroup, a timeout</td><td><code>cannot_see_or_signal_other_processes</code>, <code>cannot_gain_privileges</code></td></tr>
+  </table></div>
+
+  <h2>Policy as code</h2>
+  <p>Each repository carries <code>.foil/policy</code>, reviewed in pull requests like any other code. Every strict session in that repository follows it. The command line may add rules, never remove them, and a malformed rule stops the session before it starts.</p>
+<pre><code># .foil/policy
+allow-host api.github.com
+allow-host pypi.org
+allow-host files.pythonhosted.org
+hide .env*
+hide config/credentials.json
+hide deploy/keys
+timeout 2h
+memory 8G</code></pre>
+  <p><code>foil policy init</code> writes a starting point with the secret-looking files it finds (<code>.env*</code>, <code>*.pem</code>, <code>*.key</code>, <code>credentials.json</code>, <code>service-account*.json</code>, <code>.npmrc</code>, <code>terraform.tfstate</code>, <code>secrets/</code>…) already hidden. Put a <code>CODEOWNERS</code> rule on <code>.foil/</code> so security reviews changes to it.</p>
+
+  <h2>Audit: every session, as JSON lines</h2>
+  <p>A real session (Claude Code, Haiku 4.5, asked to fix a bug and then probe its sandbox):</p>
+<pre><code>{"event":"start","foil":"0.5.0","command":["claude","--model","claude-haiku-4-5-20251001",...],
+ "strict":true,"policy":"/home/dev/app/.foil/policy","allow_host":["api.anthropic.com"],
+ "hide":[".env","config/credentials.json"],"inject_key":["anthropic"],"timeout_s":7200.0,...}
+{"event":"net","method":"POST","host":"api.anthropic.com","port":443,"path":"/v1/messages","key_added":"anthropic","verdict":"allowed"}
+{"event":"net","method":"CONNECT","host":"pypi.org","port":443,"verdict":"blocked","reason":"not in the allowlist"}
+{"event":"end","status":0,"timed_out":false,"seconds":19.416}
+{"event":"review","changes":3,"paths":["M stats.py",...],"guarded":[]}
+{"event":"commit","applied":3,"held_back":[],"force":false}</code></pre>
+  <p>Logs are in <code>$FOIL_HOME/audit/</code> (default <code>~/.local/share/foil/audit/</code>), one file per session. Ship them with your log agent (Fluent Bit, Vector, the Datadog or Splunk forwarder) as JSON lines; <code>foil audit --json NAME</code> gives one summary object per session for a CI gate or a dashboard. Useful alerts: any <code>"verdict":"blocked"</code>; any <code>commit</code> with <code>"force":true</code> or a non-empty <code>held_back</code> later applied with <code>--guarded</code>; sessions with no <code>policy</code>.</p>
+
+  <h2>Rolling it out</h2>
+  <ol>
+    <li><strong>Pilot (a week).</strong> Five developers who already use Claude Code or Codex. <code>brew install ai-agentic-tools/tap/foil</code>, then <code>foil agent claude</code> instead of <code>claude</code>. Nothing else changes for them: same terminal, same agent, same speed (a branch is ready in ~25 ms; SWE-bench Verified scores were 35/50 with foil vs 33/50 without).</li>
+    <li><strong>Policies in the repositories that matter.</strong> <code>foil policy init</code>, review, commit, CODEOWNERS on <code>.foil/</code>. Start with the network allowlist your builds actually need; the audit logs from the pilot tell you which hosts those are.</li>
+    <li><strong>Collect the logs.</strong> Point your log agent at <code>~/.local/share/foil/audit/*.jsonl</code>.</li>
+    <li><strong>Make it the default.</strong> A shell alias or a wrapper (<code>claude</code> → <code>foil agent claude</code>) in your developer-machine baseline; in CI and agent platforms, run agents through <code>foil run --strict</code> or <code>foil serve</code> (the OpenSandbox API).</li>
+  </ol>
+
+  <h2>What Foil does not promise</h2>
+  <ul>
+    <li><strong>Not a boundary against kernel exploits.</strong> The agent shares the host kernel, as in a rootless container. For untrusted code, run foil inside a VM (<code>foil vm</code> on macOS) or a microVM.</li>
+    <li><strong>Allowed hosts are a channel.</strong> Data can leave through any host you allow, including the model API. Keep the list as narrow as the work.</li>
+    <li><strong>The audit log records, it doesn't seal.</strong> The agent can't touch it, but the developer can. Ship it off the machine if it must hold up against the developer.</li>
+    <li><strong>It records what foil sees:</strong> network requests through the proxy, the setup, the outcome and the changes, not every file the agent read inside the sandbox.</li>
+    <li><strong>macOS is weaker than Linux</strong> (Seatbelt instead of namespaces: other processes are visible, reads outside home folders aren't hidden). Details in the <a href="https://github.com/ai-agentic-tools/Foil/blob/main/SECURITY.md">threat model</a>.</li>
+    <li><strong>One layer per guarantee today.</strong> A second layer (Landlock, seccomp) and an external audit are planned before 1.0.</li>
+  </ul>
+
+  <h2>Questions</h2>
+  <h3>Do developers have to change how they work?</h3>
+  <p>No. <code>foil agent claude</code> starts the same Claude Code, in the same terminal. The difference is at the end: they see what the agent reached and changed, and decide whether to commit it.</p>
+  <h3>Does it need root, Docker or a VM?</h3>
+  <p>No. One static 2 MB binary; unprivileged user namespaces on Linux (<code>foil setup</code> once on Ubuntu, for its AppArmor rule), Seatbelt on macOS.</p>
+  <h3>Which agents?</h3>
+  <p>Claude Code and Codex have built-in profiles (<code>foil agent claude</code>, <code>foil agent codex</code>). Any other agent, harness or script runs with <code>foil run --strict</code>.</p>
+  <h3>Is it open source?</h3>
+  <p>Apache-2.0. Report vulnerabilities privately through <a href="https://github.com/ai-agentic-tools/Foil/security/advisories/new">GitHub's advisory form</a>. If you are rolling foil out across a team and want help with policies or log pipelines, <a href="https://github.com/ai-agentic-tools/Foil/discussions">start a discussion</a>.</p>
+</article>
+</main>
+<footer>
+  Foil is open source under the <a href="https://github.com/ai-agentic-tools/Foil/blob/main/LICENSE">Apache License 2.0</a>. ·
+  <a href="./">Home</a> ·
+  <a href="https://github.com/ai-agentic-tools/Foil/blob/main/SECURITY.md">Threat model</a> ·
+  <a href="https://github.com/ai-agentic-tools/Foil">GitHub</a>
+</footer>
+</body>
+</html>

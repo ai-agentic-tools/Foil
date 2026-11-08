@@ -590,3 +590,99 @@ fn doctor_finishes_and_checks_strict_mode() {
     assert_ne!(out.status.code(), Some(124), "foil doctor hung");
     assert!(text(&out.stdout).lines().any(|l| l.starts_with("ok  --strict")), "{}", text(&out.stdout));
 }
+
+// ------------------------------------------------- hide, policy, audit log
+
+fn foil(env: &Env, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_foil"))
+        .args(args)
+        .current_dir(env.root.join("ws"))
+        .env("HOME", env.root.join("home"))
+        .env("FOIL_HOME", env.root.join("branches"))
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn cannot_read_hidden_files_even_by_renaming_their_folder() {
+    if !available() {
+        return;
+    }
+    let env = Env::new("hide");
+    std::fs::create_dir_all(env.root.join("ws/config/keys")).unwrap();
+    std::fs::write(env.root.join("ws/.env"), "TOKEN=secret-env\n").unwrap();
+    std::fs::write(env.root.join("ws/config/keys/prod.pem"), "secret-pem\n").unwrap();
+    let script = "cat .env; cat config/keys/prod.pem; echo x > .env; rm -f .env; \
+                  unshare -Urm sh -c 'umount -l config/keys; umount -l .env; cat .env config/keys/prod.pem'; \
+                  mv config c2; cat c2/keys/prod.pem; echo done";
+    let out = env.run(&["-b", "h", "--hide", ".env*", "--hide", "config/keys"], script);
+    let stdout = text(&out.stdout);
+    assert!(stdout.contains("done"), "{stdout}\n{}", text(&out.stderr));
+    assert!(!stdout.contains("secret"), "{stdout}");
+    // `mv` may copy the folder (overlayfs), but only what it could read.
+    let diff = text(&foil(&env, &["diff", "h"]).stdout);
+    assert!(!diff.contains(".env") && !diff.contains("prod.pem"), "{diff}");
+    // Not even a copy of the secret in the branch store.
+    let store = Command::new("grep").args(["-rl", "secret-"]).arg(env.root.join("branches")).output().unwrap();
+    assert!(text(&store.stdout).trim().is_empty(), "{}", text(&store.stdout));
+    assert_eq!(std::fs::read_to_string(env.root.join("ws/.env")).unwrap(), "TOKEN=secret-env\n");
+    // Hiding needs --strict, and paths inside the workspace.
+    let plain = Command::new(env!("CARGO_BIN_EXE_foil")).args(["run", "--hide", ".env", "true"]).current_dir(env.root.join("ws")).output().unwrap();
+    assert!(!plain.status.success());
+    assert!(!env.run(&["--hide", "../other/secret.txt"], "true").status.success());
+}
+
+#[test]
+fn a_policy_applies_and_an_agent_cannot_widen_it() {
+    if !available() {
+        return;
+    }
+    let env = Env::new("policy");
+    std::fs::create_dir_all(env.root.join("ws/.foil")).unwrap();
+    std::fs::write(env.root.join("ws/.foil/policy"), "# test\nhide .env\n").unwrap();
+    std::fs::write(env.root.join("ws/.env"), "TOKEN=secret-env\n").unwrap();
+    let script = "cat .env; echo 'allow-host *' >> .foil/policy; mkdir -p .claude; \
+                  echo '{\"hooks\":{}}' > .claude/settings.json; echo ok > a.txt";
+    let out = env.run(&["-b", "p"], script);
+    assert!(!text(&out.stdout).contains("secret"), "{}", text(&out.stdout));
+    assert!(text(&out.stderr).contains("following"), "{}", text(&out.stderr));
+    let commit = foil(&env, &["commit", "p"]);
+    assert!(commit.status.success(), "{}", text(&commit.stderr));
+    assert!(text(&commit.stderr).contains(".foil/policy"), "{}", text(&commit.stderr));
+    assert_eq!(std::fs::read_to_string(env.root.join("ws/.foil/policy")).unwrap(), "# test\nhide .env\n");
+    assert!(!env.root.join("ws/.claude/settings.json").exists());
+    assert_eq!(std::fs::read_to_string(env.root.join("ws/a.txt")).unwrap(), "ok\n");
+    // A bad rule stops the run before it starts.
+    std::fs::write(env.root.join("ws/.foil/policy"), "branch other\n").unwrap();
+    let bad = env.run(&[], "echo must-not-run");
+    assert!(!bad.status.success() && !text(&bad.stdout).contains("must-not-run"), "{}", text(&bad.stderr));
+}
+
+#[test]
+fn the_audit_log_records_every_request_and_the_outcome() {
+    if !available() || !has("curl") {
+        return;
+    }
+    let env = Env::new("audit");
+    let allowed = serve_once(|_| "allowed-body".to_owned());
+    let other = serve_once(|_| "must-not-be-seen".to_owned());
+    let script = format!(
+        "curl -s --noproxy '' -x http://127.0.0.1:3128 http://127.0.0.1:{allowed}/; echo; \
+         curl -s --noproxy '' -x http://127.0.0.1:3128 http://127.0.0.1:{other}/; echo; echo hi > a.txt"
+    );
+    let out = env.run(&["-b", "au", "--allow-host", &format!("127.0.0.1:{allowed}")], &script);
+    assert!(text(&out.stdout).contains("allowed-body"), "{}", text(&out.stderr));
+    assert!(foil(&env, &["commit", "au"]).status.success());
+    let log = std::fs::read_to_string(env.root.join("branches/audit/au.jsonl")).unwrap();
+    assert!(log.contains("\"event\":\"start\"") && log.contains("\"event\":\"end\""), "{log}");
+    assert!(log.contains(&format!("\"port\":{allowed}")) && log.contains("\"verdict\":\"allowed\""), "{log}");
+    assert!(log.contains(&format!("\"port\":{other}")) && log.contains("\"verdict\":\"blocked\""), "{log}");
+    assert!(log.contains("\"event\":\"commit\""), "{log}");
+    // The run could neither see nor write its own log.
+    let peek = env.run(&["-b", "au2"], &format!("cat {} && echo seen", env.path("branches/audit/au.jsonl")));
+    assert!(!text(&peek.stdout).contains("seen"), "{}", text(&peek.stdout));
+    let report = text(&foil(&env, &["audit", "au"]).stdout);
+    assert!(report.contains("1 request allowed, 1 blocked"), "{report}");
+    assert!(report.contains(&format!("BLOCKED  127.0.0.1:{other}")), "{report}");
+    assert!(report.contains("committed 1"), "{report}");
+}

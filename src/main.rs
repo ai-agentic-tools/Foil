@@ -34,6 +34,13 @@ usage: foil run [options] [--] <command> [args...]
          --pids N              limit on processes and threads (needs systemd)
          --timeout TIME        stop the command after TIME (90s, 10m, 2h): SIGTERM,
                                then SIGKILL after the grace period; exit 124
+         --hide PATH           with --strict: the command can neither read nor write
+                               PATH in the workspace (.env, keys; * within a name)
+         --policy FILE         rules to follow, one option per line (default for strict
+                               runs: the workspace's .foil/policy, if it has one)
+         --audit FILE          record the run, and every network request allowed or
+                               blocked, as JSON lines (branch runs: always, in
+                               $FOIL_HOME/audit/BRANCH.jsonl)
        foil agent NAME [run options] [-- agent args]
                                run agent NAME (claude, codex) in a strict branch with
                                its profile; afterwards, review and commit or abort
@@ -54,7 +61,7 @@ usage: foil run [options] [--] <command> [args...]
                                what branch NAME changed (A added, M modified,
                                D deleted, R replaced), or the full patch;
                                paths .gitignore ignores only with --all
-       foil commit [--force] [--all] NAME
+       foil commit [--force] [--all] [--guarded] NAME
                                apply branch NAME to its workspace, then delete it;
                                refuses files changed there since, unless --force;
                                leaves out ignored paths (build output), unless --all
@@ -62,6 +69,12 @@ usage: foil run [options] [--] <command> [args...]
                                delete branch NAME; the workspace is untouched
                                (--force: also after an interrupted commit)
        foil list [--json]      list branches and their workspaces
+       foil audit [--json] [NAME | FILE]
+                               what a run did: hosts reached and blocked, changes,
+                               and what became of them; no NAME: list the logs
+       foil policy init [--force] | show
+                               write a .foil/policy for this workspace (hiding the
+                               secret-looking files found in it), or show the rules
        foil serve [--listen ADDR] [-w DIR...] [run options]
                                serve OpenSandbox's API (default 127.0.0.1:8080):
                                each sandbox is a branch of DIR (default: .) with
@@ -97,8 +110,14 @@ fn main() {
         }
         Some("pick") => {
             let (_, name) = flags_and_name(rest, &[]);
+            let held = Branch::open(&name).map(|b| held_back(&b, false)).unwrap_or_default();
             finish(foil::fanout::pick(&name).map(|(n, gone)| {
                 println!("applied {}; discarded {}", n_changes(n), if gone.is_empty() { "nothing".to_owned() } else { gone.join(", ") });
+                tell_held_back(&held);
+                note_commit(&name, n, &held, false);
+                for other in &gone {
+                    foil::audit::note(other, "abort", serde_json::json!({"by": "foil pick", "picked": name}));
+                }
             }))
         }
         // Internal: PID 1 of a strict run, and its network proxy.
@@ -119,19 +138,29 @@ fn main() {
         Some("serve") => serve(rest),
         Some("diff") => diff(rest),
         Some("commit") => {
-            let (flags, name) = flags_and_name(rest, &["--force", "--all"]);
+            let (flags, name) = flags_and_name(rest, &["--force", "--all", "--guarded"]);
             let force = flags.contains(&"--force");
             let all = flags.contains(&"--all");
-            finish(Branch::open(&name).and_then(|b| b.commit(force, all)).map(|n| {
+            let guarded = flags.contains(&"--guarded");
+            finish(Branch::open(&name).and_then(|b| {
+                let held = if guarded { Vec::new() } else { held_back(&b, all) };
+                let n = b.commit(force, all, guarded)?;
                 println!("applied {}", n_changes(n));
+                tell_held_back(&held);
+                note_commit(&name, n, &held, force);
+                Ok(())
             }))
         }
         Some("abort") => {
             let (flags, name) = flags_and_name(rest, &["--force"]);
             let force = flags.contains(&"--force");
-            finish(Branch::open(&name).and_then(|b| b.abort(force)))
+            finish(Branch::open(&name).and_then(|b| b.abort(force)).map(|()| {
+                foil::audit::note(&name, "abort", serde_json::json!({"by": "foil abort"}));
+            }))
         }
         Some("list") => list(rest),
+        Some("audit") => audit(rest),
+        Some("policy") => policy(rest),
         Some("doctor") => match foil::doctor::doctor() {
             Ok(ok) => exit(if ok { 0 } else { 1 }),
             Err(err) => finish(Err(err)),
@@ -212,11 +241,17 @@ struct RunSpec {
     timeout: Option<std::time::Duration>,
     allow_host: Vec<String>,
     inject: Vec<String>,
+    /// `--hide` patterns, relative to the workspace.
+    hide: Vec<String>,
+    audit: Option<PathBuf>,
+    policy: Option<PathBuf>,
+    /// The policy file the run follows, once read.
+    policy_used: Option<PathBuf>,
     command: Vec<OsString>,
 }
 
 fn run(args: Vec<OsString>) {
-    let spec = parse_run(args, RunSpec::default());
+    let spec = with_policy(args, RunSpec::default());
     if spec.command.is_empty() {
         usage();
     }
@@ -264,6 +299,16 @@ fn parse_run(args: Vec<OsString>, mut spec: RunSpec) -> RunSpec {
             "--allow-host" => spec.allow_host.push(text()),
             "--allow-env" => o.allow_env.push(text()),
             "--inject-key" => spec.inject.push(text()),
+            "--hide" => {
+                let pattern = text();
+                if let Err(why) = foil::policy::check_hide(&pattern) {
+                    eprintln!("foil: --hide {pattern}: {why}");
+                    exit(2)
+                }
+                spec.hide.push(pattern)
+            }
+            "--audit" => spec.audit = Some(PathBuf::from(&value)),
+            "--policy" => spec.policy = Some(PathBuf::from(&value)),
             "--setenv" => match text().split_once('=') {
                 Some((k, v)) if !k.is_empty() => o.setenv.push((k.to_owned(), v.to_owned())),
                 _ => bad(&flag, &value),
@@ -297,6 +342,9 @@ fn run_flag_takes_value(flag: &str) -> bool {
             | "--allow-host"
             | "--allow-env"
             | "--inject-key"
+            | "--hide"
+            | "--audit"
+            | "--policy"
             | "--setenv"
             | "--memory"
             | "--timeout"
@@ -345,9 +393,12 @@ fn execute(spec: &RunSpec) -> Termination {
         fail(err)
     }
 
+    let (audit, audit_path) = prepare(spec, &mut options).unwrap_or_else(|err| fail(err));
+    let started = std::time::Instant::now();
+
     // The network proxy, outside the sandbox, for an allowlist or injected keys.
     let proxy = if options.strict && (!spec.allow_host.is_empty() || !spec.inject.is_empty()) {
-        match foil::proxy::start(&spec.allow_host, &spec.inject) {
+        match foil::proxy::start(&spec.allow_host, &spec.inject, audit_path.as_deref()) {
             Ok(running) => {
                 options.proxy_dir = running.dir.clone();
                 let socket = format!("{}:{}/proxy.sock", isolate::PROXY_PORT, foil::strict::PROXY_DIR);
@@ -398,6 +449,7 @@ fn execute(spec: &RunSpec) -> Termination {
     if let Some(proxy) = proxy {
         proxy.stop();
     }
+    record_end(audit.as_ref(), &result, started);
     report(spec, result)
 }
 
@@ -459,8 +511,10 @@ fn execute(spec: &RunSpec) -> Termination {
     if let Err(err) = spec.limits.enforce(&[], false) {
         fail(err)
     }
+    let (audit, audit_path) = prepare(spec, &mut options).unwrap_or_else(|err| fail(err));
+    let started = std::time::Instant::now();
     let proxy = if options.strict && (!spec.allow_host.is_empty() || !spec.inject.is_empty()) {
-        match foil::proxy::start(&spec.allow_host, &spec.inject) {
+        match foil::proxy::start(&spec.allow_host, &spec.inject, audit_path.as_deref()) {
             Ok(running) => {
                 let port = running.port.unwrap_or_default();
                 options.proxy_port = Some(port);
@@ -503,6 +557,7 @@ fn execute(spec: &RunSpec) -> Termination {
     if let Some(proxy) = proxy {
         proxy.stop();
     }
+    record_end(audit.as_ref(), &result, started);
     report(spec, result)
 }
 
@@ -537,13 +592,25 @@ fn agent(args: Vec<OsString>) {
     }
     spec.options.setenv = profile.env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
     // The user's own options come next; whatever follows goes to the agent.
-    let mut spec = parse_run(args.collect(), spec);
+    let mut spec = with_policy(args.collect(), spec);
     let agent_args = std::mem::take(&mut spec.command);
     spec.command = std::iter::once(program.into_os_string()).chain(agent_args).collect();
     let branch = spec.branch_name.get_or_insert_with(|| agent::branch_name(&name)).clone();
+    if spec.policy_used.is_none() && spec.hide.is_empty() {
+        let here = std::env::current_dir().unwrap_or_default();
+        let secrets = foil::policy::find_secrets(&here);
+        if !secrets.is_empty() {
+            let shown: Vec<String> = secrets.iter().take(5).map(|p| p.display().to_string()).collect();
+            eprintln!(
+                "foil: {name} can read files here that look secret ({}{}): run `foil policy init` to hide them",
+                shown.join(", "),
+                if secrets.len() > 5 { ", ..." } else { "" }
+            );
+        }
+    }
 
     let termination = execute(&spec);
-    summarize(&branch, termination);
+    summarize(&branch, termination, &spec);
     exit_like(termination)
 }
 
@@ -690,22 +757,39 @@ fn fanout(args: Vec<OsString>) {
 }
 
 /// After an agent session: what the branch changed, and what to do with it.
-fn summarize(name: &str, termination: Termination) {
+fn summarize(name: &str, termination: Termination, spec: &RunSpec) {
     let how = match termination {
         Termination::Exited(code) => format!("exited with status {code}"),
         Termination::Signaled(sig) => format!("was stopped by signal {sig}"),
     };
     eprintln!("\nfoil: the agent {how}.");
+    let log_path = spec.audit.clone().or_else(|| foil::audit::path_for(name).ok());
+    if let Some(text) = log_path.as_deref().and_then(|p| std::fs::read_to_string(p).ok()) {
+        let s = foil::audit::summarize(&text);
+        eprint!("foil: network: {} allowed", plural(s.allowed_total(), "request"));
+        if s.blocked_total() == 0 {
+            eprintln!(", none blocked");
+        } else {
+            eprintln!(", {} blocked:", s.blocked_total());
+            for (target, why, n) in s.blocked.iter().take(8) {
+                eprintln!("  {target} ({why}) x{n}");
+            }
+        }
+    }
     let Ok(branch) = Branch::open(name) else { return };
     let (changes, _) = branch.changes(false).unwrap_or_default();
+    let guarded: Vec<String> = changes.iter().filter(|c| c.guarded()).map(|c| c.path.display().to_string()).collect();
+    let paths: Vec<String> = changes.iter().take(200).map(|c| format!("{} {}", c.kind.letter(), c.path.display())).collect();
+    foil::audit::note(name, "review", serde_json::json!({"changes": changes.len(), "paths": paths, "guarded": guarded}));
     if changes.is_empty() {
         eprintln!("foil: no changes in branch {name}; removing it.");
         let _ = branch.abort(false);
+        foil::audit::note(name, "abort", serde_json::json!({"by": "foil agent", "why": "no changes"}));
         return;
     }
     eprintln!("foil: branch {name} changed {} paths in {}:", changes.len(), branch.workspace.display());
     for change in changes.iter().take(15) {
-        eprintln!("  {} {}", change.kind.letter(), change.path.display());
+        eprintln!("  {} {}{}", change.kind.letter(), change.path.display(), guard_note(change));
     }
     if changes.len() > 15 {
         eprintln!("  ... and {} more", changes.len() - 15);
@@ -720,16 +804,25 @@ fn summarize(name: &str, termination: Termination) {
     let mut answer = String::new();
     let _ = std::io::stdin().read_line(&mut answer);
     match answer.trim() {
-        "c" | "commit" => match branch.commit(false, false) {
-            Ok(n) => eprintln!("foil: applied {}", n_changes(n)),
+        "c" | "commit" => match branch.commit(false, false, false) {
+            Ok(n) => {
+                eprintln!("foil: applied {}", n_changes(n));
+                let held: Vec<PathBuf> = changes.iter().filter(|c| c.guarded()).map(|c| c.path.clone()).collect();
+                tell_held_back(&held);
+                note_commit(name, n, &held, false);
+            }
             Err(err) => eprintln!("foil: {err}"),
         },
         "a" | "abort" => match branch.abort(false) {
-            Ok(()) => eprintln!("foil: branch {name} discarded"),
+            Ok(()) => {
+                eprintln!("foil: branch {name} discarded");
+                foil::audit::note(name, "abort", serde_json::json!({"by": "foil agent"}));
+            }
             Err(err) => eprintln!("foil: {err}"),
         },
         _ => eprintln!("foil: kept branch {name}; review with `foil diff --patch {name}`"),
     }
+    eprintln!("record: foil audit {name}");
 }
 
 fn diff(args: Vec<OsString>) {
@@ -753,17 +846,21 @@ fn diff(args: Vec<OsString>) {
                     .iter()
                     .map(|c| {
                         format!(
-                            "{{\"kind\":\"{}\",\"path\":{}}}",
+                            "{{\"kind\":\"{}\",\"path\":{},\"guarded\":{}}}",
                             c.kind.letter(),
-                            json_string(&c.path.to_string_lossy())
+                            json_string(&c.path.to_string_lossy()),
+                            c.guarded()
                         )
                     })
                     .collect();
                 writeln!(out, "[{}]", items.join(","))
             }
             None => {
-                for change in changes {
-                    writeln!(out, "{} {}", change.kind.letter(), change.path.display())?;
+                for change in &changes {
+                    writeln!(out, "{} {}{}", change.kind.letter(), change.path.display(), guard_note(change))?;
+                }
+                if changes.iter().any(|c| c.guarded()) {
+                    eprintln!("foil: guarded paths run on your machine outside foil (git config or hooks, a new .git, foil's policy, Claude Code or MCP settings, editor tasks); commit leaves them out unless --guarded");
                 }
                 Ok(())
             }
@@ -816,6 +913,322 @@ fn flags_and_name(args: Vec<OsString>, allowed: &[&'static str]) -> (Vec<&'stati
 }
 
 /// "1 change", "3 changes".
+/// The guarded changes (see `Change::guarded`) a commit of `branch` leaves out.
+fn held_back(branch: &Branch, all: bool) -> Vec<std::path::PathBuf> {
+    let changes = branch.changes(all).map(|(c, _)| c).unwrap_or_default();
+    changes.into_iter().filter(|c| c.guarded()).map(|c| c.path).collect()
+}
+
+fn tell_held_back(paths: &[std::path::PathBuf]) {
+    if !paths.is_empty() {
+        let list: Vec<String> = paths.iter().map(|p| format!("  {}", p.display())).collect();
+        eprintln!(
+            "foil: left out {} that would run on your machine outside foil (git config or hooks, a new .git, \
+             foil's policy, Claude Code or MCP settings, editor tasks), discarded with the branch:\n{}\n\
+             to apply such changes, review them first, then commit with --guarded",
+            if paths.len() == 1 { "1 path".to_owned() } else { format!("{} paths", paths.len()) },
+            list.join("\n")
+        );
+    }
+}
+
+/// How `foil diff` marks a guarded change.
+fn guard_note(change: &foil::change::Change) -> &'static str {
+    if change.guarded() { "  [guarded]" } else { "" }
+}
+
+/// "1 request", "3 requests".
+fn plural(n: usize, word: &str) -> String {
+    format!("{n} {word}{}", if n == 1 { "" } else { "s" })
+}
+
+/// Parse `foil run` options from `cli` on top of `base`, with the policy
+/// they name (`--policy`), or for a strict run the workspace's own, first:
+/// the command line adds to a policy, it can't take a rule away.
+fn with_policy(cli: Vec<OsString>, base: RunSpec) -> RunSpec {
+    let probe = parse_run(cli.clone(), RunSpec { options: base.options.clone(), ..RunSpec::default() });
+    let workspace = probe.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace = workspace.canonicalize().unwrap_or(workspace);
+    let path = match (&probe.policy, probe.options.strict || base.options.strict) {
+        (Some(path), _) => Some(path.clone()),
+        (None, true) => Some(workspace.join(foil::policy::FILE)),
+        (None, false) => None,
+    };
+    let Some(path) = path else { return parse_run(cli, base) };
+    let policy = match foil::policy::load(&path, &workspace) {
+        Ok(Some(policy)) => policy,
+        Ok(None) if probe.policy.is_none() => return parse_run(cli, base),
+        Ok(None) => {
+            eprintln!("foil: --policy {}: no such file", path.display());
+            exit(2)
+        }
+        Err(err) => {
+            eprintln!("foil: {err}");
+            exit(2)
+        }
+    };
+    // Once: not again when foil re-runs itself in a systemd scope for limits.
+    if std::env::var_os("FOIL_SCOPED").is_none() {
+        eprintln!("foil: following {} ({})", path.display(), plural(policy.rules, "rule"));
+    }
+    let mut spec = parse_run(policy.args.clone(), base);
+    if !spec.command.is_empty() {
+        eprintln!("foil: {}: a policy holds rules, not a command", path.display());
+        exit(2)
+    }
+    spec.policy_used = Some(path);
+    parse_run(cli, spec)
+}
+
+/// Before a run starts: find the paths `--hide` names, and open the audit
+/// log (`--audit`, or the branch's own) and record how the run is set up.
+fn prepare(spec: &RunSpec, options: &mut Options) -> std::io::Result<(Option<foil::audit::Log>, Option<PathBuf>)> {
+    let workspace = spec.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+    let workspace = workspace.canonicalize()?;
+    let mut hidden = Vec::new();
+    for pattern in &spec.hide {
+        for rel in foil::policy::expand(&workspace, pattern) {
+            if !hidden.contains(&rel) {
+                hidden.push(rel);
+            }
+        }
+    }
+    options.hide = hidden.iter().map(|rel| workspace.join(rel)).collect();
+    let path = match (&spec.audit, &spec.branch_name) {
+        (Some(path), _) => Some(std::path::absolute(path)?),
+        (None, Some(name)) => Some(foil::audit::path_for(name)?),
+        (None, None) => None,
+    };
+    let Some(path) = path else { return Ok((None, None)) };
+    let log = foil::audit::Log::open(&path).map_err(|err| std::io::Error::new(err.kind(), format!("audit log {}: {err}", path.display())))?;
+    let strings = |paths: &[PathBuf]| paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>();
+    log.event(
+        "start",
+        serde_json::json!({
+            "foil": env!("CARGO_PKG_VERSION"),
+            "command": spec.command.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+            "cwd": std::env::current_dir().map(|d| d.display().to_string()).unwrap_or_default(),
+            "workspace": workspace.display().to_string(),
+            "branch": spec.branch_name,
+            "user": std::env::var("USER").unwrap_or_default(),
+            "pid": std::process::id(),
+            "strict": options.strict,
+            "protect": options.protect,
+            "no_network": options.no_network,
+            "allow_host": spec.allow_host,
+            "inject_key": spec.inject,
+            "allow_read": strings(&options.allow_read),
+            "allow_write": strings(&options.allow_write),
+            "allow_env": options.allow_env,
+            "setenv": options.setenv.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
+            "hide": strings(&hidden),
+            "policy": spec.policy_used.as_ref().map(|p| p.display().to_string()),
+            "timeout_s": spec.timeout.map(|t| t.as_secs_f64()),
+            "memory": spec.limits.memory,
+            "cpus": spec.limits.cpus,
+            "pids": spec.limits.pids,
+        }),
+    );
+    Ok((Some(log), Some(path)))
+}
+
+/// After a run: how it ended, in its audit log.
+fn record_end(log: Option<&foil::audit::Log>, result: &std::io::Result<foil::supervisor::Outcome>, started: std::time::Instant) {
+    let Some(log) = log else { return };
+    let seconds = (started.elapsed().as_secs_f64() * 1000.0).round() / 1000.0;
+    let fields = match result {
+        Ok(o) => match o.termination {
+            Termination::Exited(code) => serde_json::json!({"status": code, "timed_out": o.timed_out, "seconds": seconds}),
+            Termination::Signaled(sig) => serde_json::json!({"signal": sig, "timed_out": o.timed_out, "seconds": seconds}),
+        },
+        Err(err) => serde_json::json!({"error": err.to_string(), "seconds": seconds}),
+    };
+    log.event("end", fields);
+}
+
+fn note_commit(name: &str, applied: usize, held: &[PathBuf], force: bool) {
+    let held: Vec<String> = held.iter().map(|p| p.display().to_string()).collect();
+    foil::audit::note(name, "commit", serde_json::json!({"applied": applied, "held_back": held, "force": force}));
+}
+
+/// `foil audit [--json] [NAME | FILE]`.
+fn audit(args: Vec<OsString>) {
+    let mut json = false;
+    let mut target = None;
+    for arg in args {
+        match arg.to_str() {
+            Some("--json") => json = true,
+            Some(a) if a.starts_with('-') => usage(),
+            _ if target.is_none() => target = Some(PathBuf::from(arg)),
+            _ => usage(),
+        }
+    }
+    let Some(target) = target else {
+        // List the logs, newest first.
+        let dir = foil::branch::home().map(|h| h.join("audit")).unwrap_or_default();
+        let mut logs: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(&dir)
+            .map(|d| d.flatten().filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path()))).collect())
+            .unwrap_or_default();
+        logs.retain(|(_, p)| p.extension().is_some_and(|e| e == "jsonl"));
+        logs.sort_by_key(|l| std::cmp::Reverse(l.0));
+        if logs.is_empty() {
+            eprintln!("foil: no audit logs yet in {}", dir.display());
+        }
+        for (_, path) in logs {
+            let s = foil::audit::summarize(&std::fs::read_to_string(&path).unwrap_or_default());
+            let name = path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let when = s.start.as_ref().and_then(|e| e.get("ts")).and_then(|t| t.as_str()).unwrap_or("?").to_owned();
+            let outcome = s.outcomes.last().and_then(|e| e.get("event")).and_then(|e| e.as_str()).unwrap_or("open");
+            println!("{name}	{when}	{} allowed	{} blocked	{outcome}", s.allowed_total(), s.blocked_total());
+        }
+        return;
+    };
+    let path = if target.is_file() {
+        target
+    } else {
+        foil::audit::path_for(&target.to_string_lossy()).unwrap_or_else(|err| {
+            eprintln!("foil: {err}");
+            exit(1)
+        })
+    };
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|err| {
+        eprintln!("foil: audit log {}: {err}", path.display());
+        exit(1)
+    });
+    let s = foil::audit::summarize(&text);
+    if json {
+        let allowed: Vec<_> = s.allowed.iter().map(|(t, n)| serde_json::json!({"target": t, "requests": n})).collect();
+        let blocked: Vec<_> = s.blocked.iter().map(|(t, w, n)| serde_json::json!({"target": t, "reason": w, "requests": n})).collect();
+        println!(
+            "{}",
+            serde_json::json!({"log": path.display().to_string(), "start": s.start, "end": s.end,
+                               "allowed": allowed, "blocked": blocked, "outcomes": s.outcomes, "bad_lines": s.bad_lines})
+        );
+        return;
+    }
+    let get = |e: &Option<serde_json::Value>, k: &str| e.as_ref().and_then(|e| e.get(k)).cloned().unwrap_or_default();
+    let list = |v: serde_json::Value| -> String {
+        let items: Vec<String> = v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect()).unwrap_or_default();
+        if items.is_empty() { "none".to_owned() } else { items.join(", ") }
+    };
+    println!("audit log {}", path.display());
+    let mut command = list(get(&s.start, "command")).replace(", ", " ");
+    if command.chars().count() > 120 {
+        command = format!("{}... (--json shows it all)", command.chars().take(120).collect::<String>());
+    }
+    println!("  command    {command}");
+    println!("  workspace  {}", get(&s.start, "workspace").as_str().unwrap_or("?"));
+    println!("  started    {}", get(&s.start, "ts").as_str().unwrap_or("?"));
+    match &s.end {
+        Some(end) => {
+            let how = match (end.get("status"), end.get("signal")) {
+                (Some(c), _) => format!("exit {c}"),
+                (_, Some(sig)) => format!("signal {sig}"),
+                _ => format!("error: {}", end.get("error").and_then(|e| e.as_str()).unwrap_or("?")),
+            };
+            let timed_out = if end.get("timed_out").and_then(|t| t.as_bool()) == Some(true) { ", timed out" } else { "" };
+            println!("  ended      {} ({how}{timed_out}, {} s)", end.get("ts").and_then(|t| t.as_str()).unwrap_or("?"), end.get("seconds").cloned().unwrap_or_default());
+        }
+        None => println!("  ended      no end recorded (still running, or foil was killed)"),
+    }
+    let mode = if get(&s.start, "strict").as_bool() == Some(true) { "strict" } else { "not strict" };
+    let policy = get(&s.start, "policy");
+    println!("  sandbox    {mode}; policy: {}", policy.as_str().unwrap_or("none"));
+    println!("  hosts      {}", list(get(&s.start, "allow_host")));
+    println!("  hidden     {}", list(get(&s.start, "hide")));
+    println!("network: {} allowed, {} blocked", plural(s.allowed_total(), "request"), s.blocked_total());
+    for (target, n) in &s.allowed {
+        println!("  allowed  {target:<40} x{n}");
+    }
+    for (target, why, n) in &s.blocked {
+        println!("  BLOCKED  {target:<40} x{n}  {why}");
+    }
+    for ev in &s.outcomes {
+        let kind = ev.get("event").and_then(|e| e.as_str()).unwrap_or("?");
+        let ts = ev.get("ts").and_then(|t| t.as_str()).unwrap_or("?");
+        match kind {
+            "review" => {
+                println!("changes: {} (at {ts})", ev.get("changes").cloned().unwrap_or_default());
+                for p in ev.get("paths").and_then(|p| p.as_array()).into_iter().flatten().take(20) {
+                    println!("  {}", p.as_str().unwrap_or(""));
+                }
+                let guarded = list(ev.get("guarded").cloned().unwrap_or_default());
+                if guarded != "none" {
+                    println!("  guarded (left out of commits unless --guarded): {guarded}");
+                }
+            }
+            "commit" => {
+                let held = list(ev.get("held_back").cloned().unwrap_or_default());
+                println!("committed {} at {ts}; held back: {held}", ev.get("applied").cloned().unwrap_or_default());
+            }
+            _ => println!("discarded at {ts} (by {})", ev.get("by").and_then(|b| b.as_str()).unwrap_or("?")),
+        }
+    }
+    if s.bad_lines > 0 {
+        println!("warning: {} lines of this log are not JSON (edited or torn)", s.bad_lines);
+    }
+}
+
+/// `foil policy init [--force] | show`.
+fn policy(args: Vec<OsString>) {
+    let args: Vec<String> = args.into_iter().map(|a| a.into_string().unwrap_or_else(|_| usage())).collect();
+    let workspace = std::env::current_dir().and_then(|d| d.canonicalize()).unwrap_or_else(|err| {
+        eprintln!("foil: {err}");
+        exit(1)
+    });
+    let path = workspace.join(foil::policy::FILE);
+    match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+        ["init"] | ["init", "--force"] => {
+            if path.exists() && args.len() == 1 {
+                eprintln!("foil: {} exists; --force replaces it", path.display());
+                exit(1)
+            }
+            let secrets = foil::policy::find_secrets(&workspace);
+            let text = foil::policy::template(&secrets);
+            finish(std::fs::create_dir_all(workspace.join(".foil")).and_then(|()| std::fs::write(&path, text)));
+            println!("wrote {}", path.display());
+            if secrets.is_empty() {
+                println!("no secret-looking files found; add `hide PATH` lines for any the agent must not read");
+            } else {
+                println!("hidden from strict runs ({}):", secrets.len());
+                for s in &secrets {
+                    println!("  {}", s.display());
+                }
+            }
+            println!("review it, then commit it with your code: every foil agent run here follows it");
+        }
+        ["show"] => {
+            let policy = match foil::policy::load(&path, &workspace) {
+                Ok(Some(policy)) => policy,
+                Ok(None) => {
+                    eprintln!("foil: no {} here; `foil policy init` writes one", foil::policy::FILE);
+                    exit(1)
+                }
+                Err(err) => {
+                    eprintln!("foil: {err}");
+                    exit(1)
+                }
+            };
+            println!("{} ({}):", path.display(), plural(policy.rules, "rule"));
+            let mut args = policy.args.iter().peekable();
+            while let Some(flag) = args.next() {
+                let flag = flag.to_string_lossy();
+                let value = args.next_if(|a| !a.to_string_lossy().starts_with("--")).map(|v| v.to_string_lossy().into_owned());
+                match (flag.as_ref(), value) {
+                    ("--hide", Some(v)) => {
+                        let found = foil::policy::expand(&workspace, &v);
+                        let shown: Vec<String> = found.iter().map(|p| p.display().to_string()).collect();
+                        println!("  hide {v}  -> {}", if shown.is_empty() { "nothing here now".to_owned() } else { shown.join(", ") });
+                    }
+                    (f, Some(v)) => println!("  {} {v}", f.trim_start_matches("--")),
+                    (f, None) => println!("  {}", f.trim_start_matches("--")),
+                }
+            }
+        }
+        _ => usage(),
+    }
+}
+
 fn n_changes(n: usize) -> String {
     format!("{n} change{}", if n == 1 { "" } else { "s" })
 }

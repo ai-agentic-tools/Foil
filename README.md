@@ -1,45 +1,115 @@
-# Foil: a local sandbox for AI coding agents
+# Foil: keep AI coding agents away from what they shouldn't touch
 
 [![CI](https://github.com/ai-agentic-tools/foil/actions/workflows/ci.yml/badge.svg)](https://github.com/ai-agentic-tools/foil/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/ai-agentic-tools/foil)](https://github.com/ai-agentic-tools/foil/releases/latest)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-**Let AI agents loose on your repo without letting them loose on your machine.**
+**Let AI agents work in your repo without handing them your secrets, your
+network, or your machine.**
 
-Run Claude Code, OpenAI Codex or any other agent or script in an instant
-copy-on-write branch of your project, then review the diff and commit it, or
-throw it away. No Docker, no root, no VM. Linux and macOS.
+Claude Code, Codex and their kind run as *you*: they can read `~/.ssh`, the
+`.env` in your repo and your cloud credentials, reach any host, and leave
+behind a git hook or a `.claude/settings.json` hook that runs on your
+machine long after the session ends. Foil puts a boundary around the agent
+that you can write down, review like code and audit afterwards. No Docker,
+no root, no VM: one 2 MB binary, Linux and macOS.
+
+```sh
+foil policy init      # writes .foil/policy: hides the .env, keys and credentials it finds
+foil agent claude     # Claude Code in a strict, copy-on-write branch of this folder
+# ...the agent works; when it exits, foil shows what it reached and changed:
+#   foil: network: 214 requests allowed, 2 blocked:
+#     pastebin.com:443 (not in the allowlist) x2
+#   foil: branch claude-20261108-101500 changed 4 paths
+#   Apply to ~/src/app? [c]ommit / [k]eep for later / [a]bort
+foil audit claude-20261108-101500   # the full record, as text or --json
+```
 
 <p align="center"><img src="https://raw.githubusercontent.com/ai-agentic-tools/Foil/main/docs/demo.svg" alt="Three Claude Code agents fix a real Django bug at once, each in its own foil branch; the best passing fix is reviewed and committed" width="100%"></p>
 
-`foil` gives a coding agent an instant, private copy-on-write *branch* of your
-working folder. The agent edits, builds and tests freely; your real folder
-does not change until you review the diff and `foil commit`. Add `--protect`
-and nothing outside the branch is writable; add `--no-network` and nothing
-leaves the box; add `--memory`/`--cpus`/`--pids` and a runaway process can't
-take the machine down with it. When the run ends, every process it started
-is gone, even daemons that double-forked away.
+## What the agent can't do
 
-```sh
-foil agent claude                  # Claude Code, in a strict branch of this folder
-# ... work with the agent; when it exits, foil shows what it changed and asks:
-# Apply to ~/src/app? [c]ommit / [k]eep for later / [a]bort
+Inside `foil agent` (any command with `foil run --strict`), each of these is
+an automated test in the escape suite ([SECURITY.md](SECURITY.md)):
+
+| The agent can't... | because |
+|---|---|
+| read `~/.ssh`, `~/.aws`, other repos, your dotfiles | it sees only system folders, the workspace and what you allow |
+| read the `.env`, keys or `credentials.json` *inside* the repo | `hide` rules cover them; the branch never holds a copy |
+| see its own API key, or any of your environment variables | foil's proxy adds the key on the way out; the environment is an allowlist |
+| reach any host you didn't allow, or this machine's services | no network but foil's allowlist proxy, which refuses internal addresses |
+| change your files before you've reviewed the diff | it works in a copy-on-write branch; `foil commit` applies it, refusing conflicts |
+| plant code that runs outside the sandbox later | git config and hooks, `.claude/settings.json` hooks, `.mcp.json`, `.vscode/tasks.json`, `.husky/` and the policy itself are held back unless you pass `--guarded` |
+| widen its own rules for next time | changes to `.foil/policy` are held back the same way |
+| see or signal your other processes, gain privileges, outlive the run | PID and IPC namespaces, `no_new_privs`, a cgroup box, `--timeout` |
+| hide what it tried | every request, allowed or blocked, is in an audit log it can't see |
+
+## Rules you can review: `.foil/policy`
+
+```text
+# .foil/policy — committed with the code, reviewed like code
+allow-host api.github.com
+allow-host pypi.org
+allow-host files.pythonhosted.org
+hide .env*
+hide config/credentials.json
+hide secrets
+allow-read ~/.cache/pip
+timeout 2h
+memory 8G
 ```
 
+One `foil run` option per line. Every strict run in the workspace follows
+it; the command line can add to it, never take a rule away; a malformed
+rule stops the run before it starts. `foil policy init` writes one with the
+secret-looking files it finds already hidden; `foil policy show` prints what
+each rule matches.
+
+## A record of every session: `foil audit`
+
+Every branch run writes a JSON-lines log outside the sandbox: how the run
+was set up (command, policy, hosts, hidden paths, limits), each network
+request the proxy allowed or blocked and why, how it ended, what it changed,
+and whether you committed, held back or discarded it.
+
+```
+$ foil audit claude-20261108-101500
+  command    claude
+  sandbox    strict; policy: /home/me/src/app/.foil/policy
+  hosts      api.anthropic.com, api.github.com, pypi.org
+  hidden     .env, config/credentials.json
+network: 216 requests allowed, 2 blocked
+  allowed  api.anthropic.com:443                    x208
+  allowed  pypi.org:443                             x6
+  BLOCKED  pastebin.com:443                         x2  not in the allowlist
+changes: 4 (at 2026-11-08T10:19:12.410Z)
+  M src/auth/validators.py
+  A .claude/settings.json
+  guarded (left out of commits unless --guarded): .claude/settings.json
+committed 3 at 2026-11-08T10:20:01.007Z; held back: .claude/settings.json
+```
+
+`foil audit --json` feeds a SIEM or a CI check; `foil audit` lists every log.
+
+## Everyday use
+
 `foil agent` runs the agent with `--strict`: it sees only system folders,
-the branch and its own state folder, can't read `~/.ssh` or your tokens,
-can't see the API key it uses (foil's proxy adds it to requests on the way
-out), and can reach only the hosts its profile allows. Any command works the
-same way with `foil run`:
+the branch and its own state folder, can't see the API key it uses, and can
+reach only the hosts its profile and your policy allow. Any command works
+the same way with `foil run`:
 
 ```sh
-foil run -b fix-login --strict --allow-host pypi.org --memory 8G -- ./my-agent
+foil run -b fix-login --strict --allow-host pypi.org --hide .env --memory 8G -- ./my-agent
 foil diff --patch fix-login        # review exactly what changed
 foil commit fix-login              # apply it (or: foil abort fix-login)
 ```
 
-No root, no daemon, no container image, no copy: one 2 MB binary, on Linux
-and on macOS.
+Without `--strict`, `foil run -b` is just the branch: the command edits,
+builds and tests freely and your real folder doesn't change until
+`foil commit`. Add `--protect` and nothing outside the branch is writable;
+add `--no-network` and nothing leaves the box; add `--memory`/`--cpus`/`--pids`
+and a runaway process can't take the machine down with it. When the run
+ends, every process it started is gone, even daemons that double-forked away.
 
 ## Demo: three agents fix a real Django bug
 
@@ -96,6 +166,11 @@ the copy.
 *Measured on Ubuntu 26.04, Linux 7.0, 4 vCPU VM. The branch cost does not
 grow with the workspace: nothing is copied until it is written.*
 
+The sandbox doesn't hold the agent back. On 50 SWE-bench Verified tasks,
+Claude Code (Haiku 4.5) solved 35 under `foil agent claude` in strict mode
+and 33 without foil, at about the same cost
+([results](bench/swebench/RESULTS-VERIFIED.md)).
+
 ## How foil compares
 
 | | git worktree | Docker / dev container | Cloud sandbox (E2B, Daytona, OpenSandbox) | Agent's own sandbox mode | **foil** |
@@ -124,6 +199,12 @@ agent, not an attacker with a kernel exploit.
   also changed in the real folder since the branch was made (say, by
   another agent's commit), naming each one; `--force` overrides. Commits
   into one folder take turns, so two agents can never both win.
+- **Nothing that runs on your machine slips through.** Git runs a
+  repository's config (`core.fsmonitor`, `core.hooksPath`, aliases) and its
+  hooks without asking. So `foil diff` marks changes to them, or a new
+  `.git`, as `[guarded]`, and commit leaves them out and says so, unless you
+  review them and pass `--guarded`. The agent's own git commits (objects,
+  refs, the index) are applied as usual.
 - **Crash-safe commit.** A commit records what it will do before it starts
   and syncs to disk before it deletes the branch. If foil is killed, the
   machine loses power or the disk fills half-way, run `foil commit NAME`
@@ -266,14 +347,20 @@ foil run [options] [--] <command> [args...]
   --cpus N              CPU limit, e.g. 1.5
   --pids N              process and thread limit
   --timeout TIME        stop the command after TIME (90s, 10m, 2h); exit 124
+  --hide PATH           with --strict: PATH in the workspace can't be read or
+                        written (.env, keys; * within a name; repeatable)
+  --policy FILE         follow FILE's rules (strict runs: .foil/policy by default)
+  --audit FILE          record the run as JSON lines (branch runs: always)
 foil agent NAME [run options] [-- agent args]    NAME: claude, codex
 foil diff [--patch | --json] [--all] NAME
 foil fanout -n N [--check CMD] [--agent NAME] [--name BASE] [--pick] [--json] [run options] [--] ...
 foil pick NAME
 foil session [--] <command> [args...]
-foil commit [--force] [--all] NAME
+foil commit [--force] [--all] [--guarded] NAME
 foil abort [--force] NAME
 foil list [--json]
+foil audit [--json] [NAME | FILE]
+foil policy init [--force] | show
 foil serve [--listen ADDR] [-w DIR...] [run options]    OpenSandbox's API (below)
 foil doctor
 foil setup [--print]
@@ -289,7 +376,8 @@ a systemd scope), `FOIL_NO_CGROUP=1` (no cleanup box).
 
 ## What foil is not
 
-foil is a guard rail, not a security boundary against a determined attacker.
+foil is a guard rail for agents that are wrong, misled or prompt-injected,
+not a boundary against a determined attacker with a kernel exploit.
 
 - **Without `--strict`, reads are not restricted.** `--protect` stops writes;
   the command can still *read* whatever you can. `--strict` hides everything
@@ -326,6 +414,13 @@ namespaces, overlayfs and cgroups:
 | `--protect`, `--strict`, `--no-network` | mount, PID, IPC and network namespaces | a Seatbelt profile (the sandbox Chrome, Codex and Claude Code use) |
 | Cleanup | a cgroup per run | every process carries the run's profile, so even detached ones are found and stopped |
 | Limits | `--memory`, `--cpus`, `--pids` | `--memory` as a watchdog; `--timeout` |
+
+A strict run gets its own temp folder (`TMPDIR`) and can't read or write
+`/tmp`, `/var/tmp` or your own temp folder, where other programs and other
+runs keep files; only files `mktemp` makes there (it ignores `TMPDIR` on
+macOS) can be opened, by their random names. A tool that insists on `/tmp`
+itself fails there; foil points Claude Code's own temp folder
+(`CLAUDE_CODE_TMPDIR`) at the run's.
 
 Weaker than Linux: a strict run can still see that other processes exist
 and reach macOS system services; tools that wrote absolute paths into the

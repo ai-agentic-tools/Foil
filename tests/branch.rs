@@ -444,3 +444,62 @@ fn ignored_build_output_is_left_out_of_diff_and_commit_unless_all() {
     assert_eq!(env.read("a.txt").as_deref(), Some("changed\n"));
     assert!(!env.ws().join("build").exists() && !env.ws().join("a.pyc").exists(), "build output was committed");
 }
+
+/// When the coarse clock trails too far, the branch keeps the coarse time,
+/// and a file changed just before the branch carries a later stamp. That
+/// file, unchanged since, is no conflict; a file changed after the branch
+/// still is. (Test builds can force the fallback.)
+#[test]
+fn a_file_changed_just_before_the_branch_is_no_conflict_even_on_a_lagging_clock() {
+    if !branches_available() {
+        return;
+    }
+    let env = Env::new("lagging-clock");
+    std::fs::write(env.ws().join("before.txt"), "written just before\n").unwrap();
+    std::fs::write(env.ws().join("after.txt"), "base\n").unwrap();
+    let run = env
+        .foil(&["run", "-b", "t", "--", "sh", "-c", "echo branch > before.txt; echo branch > after.txt"])
+        .env("FOIL_TEST_COARSE_FALLBACK", "1")
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", text(&run.stderr));
+    assert!(env.root.join("home/branches/t/recent").exists(), "the fallback was not taken");
+
+    std::fs::write(env.ws().join("after.txt"), "changed outside\n").unwrap();
+    let refused = env.foil(&["commit", "t"]).output().unwrap();
+    let stderr = text(&refused.stderr);
+    assert_eq!(refused.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("  after.txt") && !stderr.contains("before.txt"), "{stderr}");
+
+    // Put after.txt back as it was: same file, same content, so no conflict.
+    std::fs::write(env.ws().join("after.txt"), "base\n").unwrap();
+    let out = env.foil(&["commit", "t"]).output().unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(env.read("before.txt").as_deref(), Some("branch\n"));
+    assert_eq!(env.read("after.txt").as_deref(), Some("branch\n"));
+}
+
+/// If the wall clock was set back since the branch was made, a change made
+/// after the branch can carry an earlier time than the branch. Then files
+/// changed that long before the branch count as changed since: refusing is
+/// the safe mistake. (Test builds can pretend the clock was set back.)
+#[test]
+fn a_clock_set_back_widens_the_conflict_check_instead_of_missing_changes() {
+    if !branches_available() {
+        return;
+    }
+    let env = Env::new("clock-set-back");
+    assert!(env.run("t", "echo branch > a.txt").status.success());
+    let ok = env.foil(&["diff", "t"]).output().unwrap();
+    assert!(ok.status.success());
+
+    let refused = env.foil(&["commit", "t"]).env("FOIL_TEST_CLOCK_SET_BACK_MS", "60000").output().unwrap();
+    let stderr = text(&refused.stderr);
+    assert_eq!(refused.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("  a.txt") && stderr.contains("clock was set back"), "{stderr}");
+    assert_eq!(env.read("a.txt").as_deref(), Some("base\n"));
+
+    let out = env.foil(&["commit", "t"]).output().unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(env.read("a.txt").as_deref(), Some("branch\n"));
+}

@@ -394,9 +394,12 @@ not a boundary against a determined attacker with a kernel exploit.
   see a commit half-done while it runs; if it stops half-way, `foil commit`
   finishes it.
 - **Conflicts are detected per path, not merged.** A conflicting commit is
-  refused; you choose to force it or abort. Detection uses change times: a
-  change made in the same instant just before the branch can be flagged
-  (the safe mistake); one made after is never missed.
+  refused; you choose to force it or abort. On Linux, detection uses change
+  times: a change made just before the branch can be flagged (the safe
+  mistake). If the wall clock is set back while a branch exists (NTP, or a
+  VM syncing with its host), commit widens the check by as much and says
+  so, so a later change is not missed; a VM whose clock keeps being set
+  back makes these refusals common, so fix its time sync.
 - **Renaming a folder inside a branch is a copy.** overlayfs answers a folder
   rename with "cross-device", so tools like `mv` copy and delete instead:
   slower for big folders, and it fails half-way on a folder whose owner

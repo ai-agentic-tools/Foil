@@ -64,6 +64,8 @@ enum Kind {
     Dir,
     /// A new, private devpts instance (for programs that open terminals).
     Devpts,
+    /// `--hide` for a folder: an empty, read-only tmpfs no one may enter.
+    Hidden,
 }
 
 #[derive(Clone)]
@@ -94,6 +96,9 @@ pub struct Spec<'a> {
     /// The host folder holding the network proxy's socket.
     pub proxy_dir: Option<&'a Path>,
     pub home: Option<PathBuf>,
+    /// Paths in the workspace to hide (see `Kind::Hidden`; a file is
+    /// covered by `/dev/null` on a `nodev` mount, which can't be opened).
+    pub hide: &'a [PathBuf],
 }
 
 impl View {
@@ -155,6 +160,24 @@ impl View {
             if !nested {
                 map.entry(given).or_insert(kind);
             }
+        }
+        // Hidden paths last among the user's paths, so nothing given above
+        // can show them again. Their folders are in the workspace's mount.
+        for path in spec.hide {
+            let meta = fs::symlink_metadata(path)
+                .map_err(|err| io::Error::new(err.kind(), format!("--hide {}: {err}", path.display())))?;
+            if meta.file_type().is_symlink() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("--hide {}: is a symlink; hide what it points to", path.display()),
+                ));
+            }
+            let kind = if meta.is_dir() {
+                Kind::Hidden
+            } else {
+                Kind::Bind { source: c_path(Path::new("/dev/null"))?, read_only: true, devices: false, dir: false }
+            };
+            map.insert(path.clone(), kind);
         }
         // Private scratch space, devices, /proc, and the proxy socket.
         let tmpfs = |opts: &str| Kind::Tmpfs(CString::new(opts).expect("no NUL"));
@@ -264,8 +287,10 @@ pub unsafe fn build(view: &View) -> io::Result<()> {
             Kind::Bind { dir, .. } => {
                 if *dir {
                     mkdir_ok(&entry.target)?;
-                } else {
-                    // A file is mounted over a file.
+                } else if libc::access(target, libc::F_OK) != 0 {
+                    // A file is mounted over a file. One that exists (a hidden
+                    // file in the branch) is not opened for writing: overlayfs
+                    // would copy it up into the branch.
                     let f = libc::open(target, libc::O_CREAT | libc::O_WRONLY | libc::O_CLOEXEC, 0o644);
                     if f != -1 {
                         libc::close(f);
@@ -297,6 +322,15 @@ pub unsafe fn build(view: &View) -> io::Result<()> {
                 ))?;
             }
             Kind::Dir => mkdir_ok(&entry.target)?,
+            Kind::Hidden => {
+                cvt(libc::mount(
+                    c"tmpfs".as_ptr(),
+                    target,
+                    c"tmpfs".as_ptr(),
+                    libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC | libc::MS_RDONLY,
+                    c"mode=000,size=4k".as_ptr().cast(),
+                ))?;
+            }
             Kind::Devpts => {
                 mkdir_ok(&entry.target)?;
                 cvt(libc::mount(
@@ -450,7 +484,7 @@ mod tests {
     #[test]
     fn view_puts_parents_before_children_and_hides_home_contents() {
         let home = std::env::temp_dir().join("foil-view-home");
-        let spec = Spec { workspace: None, allow_read: &[], allow_write: &[], proxy_dir: None, home: Some(home.clone()) };
+        let spec = Spec { workspace: None, allow_read: &[], allow_write: &[], proxy_dir: None, home: Some(home.clone()), hide: &[] };
         let view = View::new(&spec).unwrap();
         let paths: Vec<&[u8]> = view.entries.iter().map(|e| &e.target.as_bytes()[STAGING.len()..]).collect();
         let pos = |p: &str| paths.iter().position(|q| *q == p.as_bytes()).unwrap();
@@ -466,7 +500,7 @@ mod tests {
         fs::create_dir_all(root.join("real/env")).unwrap();
         std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
         let given = [root.join("link/env")];
-        let spec = Spec { workspace: None, allow_read: &given, allow_write: &[], proxy_dir: None, home: None };
+        let spec = Spec { workspace: None, allow_read: &given, allow_write: &[], proxy_dir: None, home: None, hide: &[] };
         let view = View::new(&spec).unwrap();
         let shown = |p: &Path| view.entries.iter().any(|e| e.target.as_bytes() == staged_bytes(p));
         assert!(shown(&root.canonicalize().unwrap().join("real/env")));

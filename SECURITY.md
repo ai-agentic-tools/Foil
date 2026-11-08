@@ -36,6 +36,10 @@ must not be able to:
 | Reach local services or host sockets | network namespace; abstract sockets are per namespace | `cannot_reach_local_services_or_host_tmp`, `cannot_reach_host_abstract_unix_sockets` |
 | Trick a commit into writing outside the workspace | commit through open folder handles, never following symlinks | `commit_does_not_follow_a_symlink_the_branch_replaced` |
 | Get code run on your machine after commit (git config, hooks, a new `.git`) | `foil diff` marks them `[guarded]`; commit leaves them out unless `--guarded` | `commit_leaves_out_git_config_and_hooks_unless_asked` (`tests/branch.rs`) |
+| Read or change files in the workspace it was told to leave alone (`.env`, keys) | `--hide` / `hide` in `.foil/policy`: `/dev/null` on a `nodev` mount over a file, an empty read-only tmpfs over a folder, locked to the run's user namespace; the branch never holds a copy | `cannot_read_hidden_files_even_by_renaming_their_folder` |
+| Widen its own rules for the next run | changes to `.foil/` are guarded: commit leaves them out | `a_policy_applies_and_an_agent_cannot_widen_it` |
+| Plant code other tools run outside the sandbox later (Claude Code hooks, MCP servers, editor tasks, husky hooks) | `.claude/settings*.json`, `.claude/hooks/`, `.mcp.json`, `.cursor/mcp.json`, `.vscode/tasks.json`, `.vscode/settings.json`, `.husky/` are guarded like git config | `files_other_tools_run_are_guarded` (`src/change.rs`), `a_policy_applies_and_an_agent_cannot_widen_it` |
+| Read or rewrite its own audit log | the log is in foil's store, outside the view; foil and its proxy write it from outside | `the_audit_log_records_every_request_and_the_outcome` |
 | Outlive the run | cgroup box + subreaper + PID namespace; `--timeout` | `leftovers_inside_a_strict_run_end_with_it` |
 
 Without `--strict`, `--protect` only stops *writes* outside the branch;
@@ -61,11 +65,21 @@ reads are not restricted.
   foil's environment, the agent uses the login saved in its state folder
   (e.g. `~/.claude/.credentials.json`), which commands it runs can read;
   `foil agent` warns about this.
-- **Files that run later.** Commit guards what git runs by itself. Other
-  files an agent edits can run code when *you* use them: a `Makefile`, a
-  `package.json` script, `.envrc` (direnv asks first), `.vscode/tasks.json`
-  (VS Code asks first in an untrusted folder). Those are ordinary changes;
-  read them in `foil diff --patch` before you commit.
+- **Files that run later.** Commit guards what git, Claude Code, MCP
+  clients, VS Code and husky run by themselves (see the table). Other files
+  an agent edits can still run code when *you* use them: a `Makefile`, a
+  `package.json` script, a test, `.envrc` (direnv asks first). Those are
+  ordinary changes; read them in `foil diff --patch` before you commit.
+- **The audit log records, it doesn't seal.** It lives in your foil store
+  as a file you own: the run can't reach it, but anything running as you
+  outside foil can edit it. Ship it elsewhere (a log collector) if it must
+  hold up against you. It records what foil saw: network requests through
+  the proxy, the run's setup and outcome, the branch's changes — not each
+  file the agent read or each command it ran inside.
+- **Hidden means hidden from the run, by path.** `--hide` covers the paths
+  that exist when the run starts. A copy of the secret elsewhere in the
+  workspace (a backup, a test fixture) is not hidden unless listed;
+  `foil policy init` lists secret-looking names a few folders deep.
 - **What you allow, it gets.** `--allow-read`, `--allow-write` and
   `--allow-env` are passed through as asked; `foil agent` allows the
   agent's own state folder (e.g. `~/.claude`) so it can work.

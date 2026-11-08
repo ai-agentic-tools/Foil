@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.5.0 — 2026-11-08
+
+Guardrails for running agents where it matters: keep secrets in the repo
+out of their reach, write the rules down where your team reviews them,
+and keep a record of everything the agent reached for.
+
+### Added
+
+- **`--hide PATH`** (strict runs): a file or folder in the workspace the
+  command can neither read nor write — `.env`, keys, `credentials.json`,
+  a `secrets/` folder. `*` works within a name (`--hide '.env*'`). Linux
+  covers a file with `/dev/null` on a `nodev` mount (opening it fails) and
+  a folder with an empty read-only tmpfs; the agent can't unmount them
+  (the mounts are locked to its user namespace) and the branch never
+  holds a copy. macOS denies them in the Seatbelt profile and empties
+  them in the branch's clones, so renaming a folder above them finds
+  nothing. The workspace keeps its files; `foil diff` shows no change.
+- **Policy files.** `.foil/policy` in a workspace holds `foil run`
+  options, one per line (`allow-host pypi.org`, `hide .env`, `timeout 2h`).
+  Strict runs (`foil agent`, `foil run --strict`, fanout) follow it;
+  `--policy FILE` names another. The command line adds to a policy, never
+  takes a rule away, and an unknown or malformed rule stops the run before
+  it starts. `foil policy init` writes one, hiding the secret-looking
+  files it finds; `foil policy show` prints the rules and what each
+  `hide` matches. `foil agent` points out secret-looking files when no
+  policy hides them.
+- **Audit log.** Every branch run writes `$FOIL_HOME/audit/BRANCH.jsonl`
+  (`--audit FILE` for any run): how the run was set up (command, policy,
+  hosts, hidden and allowed paths, limits), every request the network
+  proxy allowed or blocked (method, host, port, why), how it ended, the
+  changes it left, and whether they were committed, held back or
+  discarded (also by a later `foil commit`, `foil abort` or `foil pick`).
+  The run can't see or write it. `foil audit NAME` summarizes one log;
+  `foil audit` lists them; `--json` for tools. `foil agent` ends with the
+  network summary.
+
+### Security
+
+- **More files that run outside the sandbox are guarded.** Like git
+  config and hooks in 0.4.1, commit now leaves out changes to files other
+  tools act on without asking, unless `--guarded`: `.foil/` (an agent must
+  not widen its own policy), `.claude/settings.json`,
+  `.claude/settings.local.json` and `.claude/hooks/` (Claude Code hooks run
+  shell commands), `.mcp.json` and `.cursor/mcp.json` (each MCP server is
+  a command), `.vscode/tasks.json` and `.vscode/settings.json`, and
+  `.husky/`.
+
 ## 0.4.1 — 2026-11-05
 
 A security fix: an agent could get code run on your machine through a

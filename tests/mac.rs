@@ -410,3 +410,69 @@ fn doctor_passes() {
     let out = Command::new(env!("CARGO_BIN_EXE_foil")).arg("doctor").output().unwrap();
     assert!(out.status.success(), "{}", text(&out.stdout));
 }
+
+// ------------------------------------------------- hide, policy, audit log
+
+#[test]
+fn cannot_read_hidden_files_even_by_renaming_their_folder() {
+    let env = Env::new("hide");
+    std::fs::create_dir_all(env.root.join("home/ws/config/keys")).unwrap();
+    std::fs::write(env.root.join("home/ws/.env"), "TOKEN=secret-env\n").unwrap();
+    std::fs::write(env.root.join("home/ws/config/keys/prod.pem"), "secret-pem\n").unwrap();
+    let script = "cat .env; cat config/keys/prod.pem; echo x > .env; rm -f .env; \
+                  mv config c2 && cat c2/keys/prod.pem; ls c2/keys; echo done";
+    let out = env.run(&["--strict", "-b", "h", "--hide", ".env*", "--hide", "config/keys"], script);
+    let stdout = text(&out.stdout);
+    assert!(stdout.contains("done"), "{stdout}\n{}", text(&out.stderr));
+    assert!(!stdout.contains("secret"), "{stdout}");
+    let diff = text(&env.foil(&["diff", "h"]).stdout);
+    assert!(!diff.contains(".env"), "{diff}");
+    // The workspace keeps its secrets; the branch never had a copy to change.
+    assert_eq!(env.read(".env").as_deref(), Some("TOKEN=secret-env\n"));
+    assert_eq!(env.read("config/keys/prod.pem").as_deref(), Some("secret-pem\n"));
+}
+
+#[test]
+fn a_policy_applies_and_an_agent_cannot_widen_it() {
+    let env = Env::new("policy");
+    std::fs::create_dir_all(env.root.join("home/ws/.foil")).unwrap();
+    std::fs::write(env.root.join("home/ws/.foil/policy"), "# test\nhide .env\n").unwrap();
+    std::fs::write(env.root.join("home/ws/.env"), "TOKEN=secret-env\n").unwrap();
+    let script = "cat .env; echo 'allow-host *' >> .foil/policy; mkdir -p .claude; \
+                  echo '{\"hooks\":{}}' > .claude/settings.json; echo ok > a.txt";
+    let out = env.run(&["--strict", "-b", "p"], script);
+    assert!(!text(&out.stdout).contains("secret"), "{}", text(&out.stdout));
+    assert!(text(&out.stderr).contains("following"), "{}", text(&out.stderr));
+    let commit = env.foil(&["commit", "p"]);
+    assert!(commit.status.success(), "{}", text(&commit.stderr));
+    assert!(text(&commit.stderr).contains(".foil/policy"), "{}", text(&commit.stderr));
+    assert_eq!(env.read(".foil/policy").as_deref(), Some("# test\nhide .env\n"));
+    assert!(env.read(".claude/settings.json").is_none());
+    assert_eq!(env.read("a.txt").as_deref(), Some("ok\n"));
+    // Not strict: the policy is not read, so it can't break plain runs.
+    let plain = env.run(&[], "true");
+    assert!(plain.status.success() && !text(&plain.stderr).contains("following"));
+}
+
+#[test]
+fn the_audit_log_records_every_request_and_the_outcome() {
+    let env = Env::new("audit");
+    let allowed = serve_once(|_| "allowed-body".to_owned());
+    let other = serve_once(|_| "must-not-be-seen".to_owned());
+    let script = format!(
+        "curl -s --noproxy '' -x \"$HTTP_PROXY\" http://127.0.0.1:{allowed}/; echo; \
+         curl -s --noproxy '' -x \"$HTTP_PROXY\" http://127.0.0.1:{other}/; echo; echo hi > a.txt"
+    );
+    let out = env.run(&["--strict", "-b", "au", "--allow-host", &format!("127.0.0.1:{allowed}")], &script);
+    assert!(text(&out.stdout).contains("allowed-body"), "{}", text(&out.stderr));
+    assert!(env.foil(&["commit", "au"]).status.success());
+    let log = std::fs::read_to_string(env.root.join("store/audit/au.jsonl")).unwrap();
+    assert!(log.contains("\"event\":\"start\"") && log.contains("\"event\":\"end\""), "{log}");
+    assert!(log.contains(&format!("\"port\":{allowed}")) && log.contains("\"verdict\":\"allowed\""), "{log}");
+    assert!(log.contains(&format!("\"port\":{other}")) && log.contains("\"verdict\":\"blocked\""), "{log}");
+    assert!(log.contains("\"event\":\"commit\""), "{log}");
+    let report = text(&env.foil(&["audit", "au"]).stdout);
+    assert!(report.contains("1 request allowed, 1 blocked"), "{report}");
+    assert!(report.contains(&format!("BLOCKED  127.0.0.1:{other}")), "{report}");
+    assert!(report.contains("committed 1"), "{report}");
+}

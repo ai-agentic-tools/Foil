@@ -50,6 +50,9 @@ impl Change {
     /// workspace, so commit keeps them out unless asked (`--guarded`).
     /// `.git` in any case: macOS finds `.GIT` when git looks for `.git`.
     pub fn guarded(&self) -> bool {
+        if self.runs_elsewhere() {
+            return true;
+        }
         let mut parts = self.path.iter().skip_while(|p| !p.eq_ignore_ascii_case(".git"));
         if parts.next().is_none() {
             return false;
@@ -62,9 +65,55 @@ impl Change {
     }
 }
 
+/// Files at the top of a workspace that tools outside foil act on without
+/// asking: foil's own policy (an agent must not widen its next run's
+/// rules), Claude Code's project settings (hooks run shell commands), MCP
+/// server lists (each server is a command), editor tasks and settings that
+/// run programs, and git hooks kept in the tree (husky). An agent in a
+/// sandbox that changes these is reaching outside it, later.
+const RUN_ELSEWHERE: [&str; 9] = [
+    ".foil",
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+    ".claude/hooks",
+    ".mcp.json",
+    ".cursor/mcp.json",
+    ".vscode/tasks.json",
+    ".vscode/settings.json",
+    ".husky",
+];
+
+impl Change {
+    /// Whether this change is in (or is) one of `RUN_ELSEWHERE`'s paths.
+    fn runs_elsewhere(&self) -> bool {
+        let parts: Vec<String> = self.path.iter().map(|p| p.to_string_lossy().to_ascii_lowercase()).collect();
+        RUN_ELSEWHERE.iter().any(|g| {
+            let g: Vec<&str> = g.split('/').collect();
+            parts.len() >= g.len() && parts.iter().zip(&g).all(|(a, b)| a == b)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Change, ChangeKind};
+
+    #[test]
+    fn files_other_tools_run_are_guarded() {
+        assert!(guarded(ChangeKind::Modified, ".foil/policy"));
+        assert!(guarded(ChangeKind::Deleted, ".foil"));
+        assert!(guarded(ChangeKind::Added, ".claude/settings.json"));
+        assert!(guarded(ChangeKind::Added, ".claude/settings.local.json"));
+        assert!(guarded(ChangeKind::Added, ".claude/hooks/pre.sh"));
+        assert!(guarded(ChangeKind::Modified, ".mcp.json"));
+        assert!(guarded(ChangeKind::Modified, ".VSCode/tasks.json"));
+        assert!(guarded(ChangeKind::Added, ".husky/pre-commit"));
+        assert!(!guarded(ChangeKind::Added, ".claude/commands/review.md"));
+        assert!(!guarded(ChangeKind::Modified, "CLAUDE.md"));
+        assert!(!guarded(ChangeKind::Modified, "src/.foil.rs"));
+        assert!(!guarded(ChangeKind::Modified, "docs/.mcp.json.md"));
+        assert!(!guarded(ChangeKind::Modified, ".vscode/extensions.json"));
+    }
 
     fn guarded(kind: ChangeKind, path: &str) -> bool {
         Change { kind, path: path.into() }.guarded()

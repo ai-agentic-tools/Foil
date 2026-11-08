@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <url><loc>https://ai-agentic-tools.github.io/Foil/</loc><lastmod>2026-11-02</lastmod></url>
+  <url><loc>https://ai-agentic-tools.github.io/Foil/</loc><lastmod>2026-11-08</lastmod></url>
   <url><loc>https://ai-agentic-tools.github.io/Foil/benchmarks.html</loc><lastmod>2026-11-03</lastmod></url>
   <url><loc>https://ai-agentic-tools.github.io/Foil/blog/parallel-agents.html</loc><lastmod>2026-11-02</lastmod></url>
   <url><loc>https://ai-agentic-tools.github.io/Foil/blog/git-config-escape.html</loc><lastmod>2026-11-05</lastmod></url>
+  <url><loc>https://ai-agentic-tools.github.io/Foil/security.html</loc><lastmod>2026-11-08</lastmod></url>
+  <url><loc>https://ai-agentic-tools.github.io/Foil/blog/agent-guardrails.html</loc><lastmod>2026-11-08</lastmod></url>
 </urlset>

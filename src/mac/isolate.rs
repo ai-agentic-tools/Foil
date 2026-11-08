@@ -48,6 +48,9 @@ pub struct Options {
     pub proxy_port: Option<u16>,
     /// Unix sockets the run may create and listen on (`foil serve`'s execd).
     pub listen: Vec<PathBuf>,
+    /// `--hide`: paths in the workspace a strict run may neither read nor
+    /// write (absolute, in the real workspace; never symlinks).
+    pub hide: Vec<PathBuf>,
 }
 
 /// Variables a strict run keeps from foil's environment.
@@ -97,6 +100,9 @@ impl Plan {
         }
         if !options.allow_read.is_empty() && !options.strict {
             return Err(invalid("--allow-read only makes sense with --strict".to_owned()));
+        }
+        if !options.hide.is_empty() && !options.strict {
+            return Err(invalid("--hide only makes sense with --strict".to_owned()));
         }
         let isolated = overlay.is_some() || options.protect || options.no_network || options.strict;
         if foil_is_sandboxed() {
@@ -260,6 +266,34 @@ impl Plan {
             }
         }
 
+        // Hidden paths: denied where the command sees them (in the branch's
+        // clone) and in the real workspace. In a branch they are also
+        // emptied in both clones (not in the workspace), so a way around
+        // the rule (renaming a folder above them) finds nothing, and the
+        // branch shows no change there.
+        if options.strict {
+            for path in &options.hide {
+                let meta = std::fs::symlink_metadata(path)
+                    .map_err(|err| io::Error::new(err.kind(), format!("--hide {}: {err}", path.display())))?;
+                if meta.file_type().is_symlink() {
+                    return Err(invalid(format!("--hide {}: is a symlink; hide what it points to", path.display())));
+                }
+                let mut places = vec![path.clone()];
+                if let Some(o) = &overlay {
+                    let ws = o.workspace.canonicalize().unwrap_or_else(|_| o.workspace.clone());
+                    let rel = path.strip_prefix(&ws).map_err(|_| invalid(format!("--hide {}: not in the workspace", path.display())))?;
+                    let (tree, base) = (o.tree.join(rel), o.dir.join("base").join(rel));
+                    blank(&tree)?;
+                    blank(&base)?;
+                    places.push(tree);
+                }
+                let rule = if meta.is_dir() { "subpath" } else { "literal" };
+                for place in places {
+                    p.push_str(&format!("(deny file-read* file-write* ({rule} {}))\n", quote(&place)));
+                }
+            }
+        }
+
         // Last, so these win over the denials above: the sockets the run may listen on.
         for socket in &options.listen {
             p.push_str(&format!(
@@ -322,6 +356,32 @@ impl Plan {
             let _ = std::fs::remove_dir_all(home.with_extension("tmp"));
         }
     }
+}
+
+/// Empty a hidden path in a branch clone: a file keeps its name and mode
+/// but no contents; a folder keeps nothing inside.
+fn blank(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(meta) = std::fs::symlink_metadata(path) else { return Ok(()) };
+    if meta.file_type().is_symlink() {
+        return Ok(());
+    }
+    let mode = meta.permissions().mode();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode | 0o700))?;
+    if meta.is_dir() {
+        for entry in std::fs::read_dir(path)?.flatten() {
+            let child = entry.path();
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                let _ = std::process::Command::new("chmod").args(["-R", "u+rwx"]).arg(&child).status();
+                std::fs::remove_dir_all(&child)?;
+            } else {
+                std::fs::remove_file(&child)?;
+            }
+        }
+    } else if meta.len() > 0 {
+        std::fs::OpenOptions::new().write(true).open(path)?.set_len(0)?;
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
 }
 
 /// The user's own temp folder (`TMPDIR`, under `/private/var/folders`).

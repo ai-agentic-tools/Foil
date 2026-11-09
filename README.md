@@ -166,10 +166,12 @@ the copy.
 *Measured on Ubuntu 26.04, Linux 7.0, 4 vCPU VM. The branch cost does not
 grow with the workspace: nothing is copied until it is written.*
 
-The sandbox doesn't hold the agent back. On 50 SWE-bench Verified tasks,
-Claude Code (Haiku 4.5) solved 35 under `foil agent claude` in strict mode
-and 33 without foil, at about the same cost
-([results](bench/swebench/RESULTS-VERIFIED.md)).
+The sandbox doesn't hold the agent back. Over three runs of 50 SWE-bench
+Verified tasks, Claude Code (Opus 5.5) solved a mean of 42.0 under
+`foil agent claude` in strict mode (41–43) and 42.7 without foil (41–44), at
+about the same cost; all 150 sandboxed commits went through
+([results](bench/swebench/RESULTS-OPUS.md); an earlier single Haiku 4.5 run:
+[35 vs 33](bench/swebench/RESULTS-VERIFIED.md)).
 
 ## How foil compares
 

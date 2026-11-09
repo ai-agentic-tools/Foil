@@ -1,5 +1,9 @@
 # foil on SWE-bench Verified: a real agent, with and without foil (2026-11-06)
 
+> Newer: `RESULTS-OPUS.md` (2026-11-08) reruns these 50 tasks three times per
+> arm with Opus 5.5 and the false-conflict fix: 42.0 vs 42.7 mean, 150 / 150
+> commits.
+
 **Verdict: Claude Code solved 35 / 50 SWE-bench Verified tasks inside foil's
 strict sandbox and 33 / 50 without it, at about the same cost and time. The
 real workspace stayed unchanged until `foil commit` on every task, and the API

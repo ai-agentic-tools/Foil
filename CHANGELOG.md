@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Benchmarks
+
+- SWE-bench Verified with Opus 5.5, three runs: a mean of 42.0 / 50 under
+  `foil agent claude` (strict) vs 42.7 / 50 without; 150 / 150 commits went
+  through (`bench/swebench/RESULTS-OPUS.md`).
+
 ### Fixed
 
 - **A wall clock set back no longer hides a conflict.** `foil commit`

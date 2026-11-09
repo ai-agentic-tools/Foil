@@ -84,7 +84,7 @@ committed 3; held back: none</code></pre>
 {"event":"commit","applied":3,"held_back":[],"force":false,...}</code></pre>
 
   <h2>What it costs</h2>
-  <p>A branch is ready in about 25 ms on any repository size, because nothing is copied until it is written. On 50 SWE-bench Verified tasks, Claude Code solved 35 under foil's strict sandbox and 33 without it. The guardrails didn't cost it the job.</p>
+  <p>A branch is ready in about 25 ms on any repository size, because nothing is copied until it is written. Over three runs of 50 SWE-bench Verified tasks, Claude Code (Opus 5.5) solved a mean of 42.0 under foil's strict sandbox and 42.7 without it, with overlapping ranges (<a href="https://github.com/ai-agentic-tools/Foil/blob/main/bench/swebench/RESULTS-OPUS.md">results</a>). The guardrails didn't cost it the job.</p>
 
   <h2>What it doesn't do</h2>
   <p>Foil shares the host kernel, like a rootless container: it is a guard rail for agents that are wrong or misled, not a wall against a kernel exploit (run it inside a VM for that). Allowed hosts are still a channel, so keep the list short. The audit log is out of the agent's reach but not yours; ship it off the machine if it must hold up against the person at the keyboard. The <a href="https://github.com/ai-agentic-tools/Foil/blob/main/SECURITY.md">threat model</a> lists every limit we know of.</p>

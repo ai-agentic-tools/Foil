@@ -77,7 +77,7 @@ memory 8G</code></pre>
 
   <h2>Rolling it out</h2>
   <ol>
-    <li><strong>Pilot (a week).</strong> Five developers who already use Claude Code or Codex. <code>brew install ai-agentic-tools/tap/foil</code>, then <code>foil agent claude</code> instead of <code>claude</code>. Nothing else changes for them: same terminal, same agent, same speed (a branch is ready in ~25 ms; SWE-bench Verified scores were 35/50 with foil vs 33/50 without).</li>
+    <li><strong>Pilot (a week).</strong> Five developers who already use Claude Code or Codex. <code>brew install ai-agentic-tools/tap/foil</code>, then <code>foil agent claude</code> instead of <code>claude</code>. Nothing else changes for them: same terminal, same agent, same speed (a branch is ready in ~25 ms; SWE-bench Verified, Opus 5.5, three runs: a mean of 42.0/50 with foil vs 42.7/50 without).</li>
     <li><strong>Policies in the repositories that matter.</strong> <code>foil policy init</code>, review, commit, CODEOWNERS on <code>.foil/</code>. Start with the network allowlist your builds actually need; the audit logs from the pilot tell you which hosts those are.</li>
     <li><strong>Collect the logs.</strong> Point your log agent at <code>~/.local/share/foil/audit/*.jsonl</code>.</li>
     <li><strong>Make it the default.</strong> A shell alias or a wrapper (<code>claude</code> → <code>foil agent claude</code>) in your developer-machine baseline; in CI and agent platforms, run agents through <code>foil run --strict</code> or <code>foil serve</code> (the OpenSandbox API).</li>

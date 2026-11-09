@@ -15,9 +15,9 @@ does. An agent is not deterministic, so single tasks may differ between the
 two arms; the comparison is the resolved rate, plus whether foil ever got in
 the agent's way (tool errors, invisible files, blocked hosts).
 
-Usage: agent.py LITE_JSONL WORKDIR STAGE1_RESULTS [--model M] [--workers N] [--only ID ...]
+Usage: agent.py LITE_JSONL WORKDIR STAGE1_RESULTS [--model M] [--max-turns N] [--tag T] [--workers N] [--only ID ...]
 Needs Claude Code on PATH and the API key in ~/.secrets/anthropic_key.
-Writes WORKDIR/agent-results.jsonl (one line per task and arm).
+Writes WORKDIR/agent-results[-TAG].jsonl (one line per task and arm).
 """
 
 import argparse
@@ -31,8 +31,8 @@ import time
 
 from run import FOIL, checkout, ensure_env, ensure_repo, fingerprint, outcome, sh, test_command, TEST_TIMEOUT
 
-AGENT_TIMEOUT = 1200
-MAX_TURNS = 60
+AGENT_TIMEOUT = 1800
+MAX_TURNS = 60  # --max-turns
 TOOLS = "Bash,Read,Edit,Write,Glob,Grep"
 
 PROMPT = """You are fixing an issue in the {repo} repository, checked out in the current folder.
@@ -53,10 +53,10 @@ def how_to_test(task, py):
     return f"Existing tests: `PYTHONPATH=. {py} bin/test <path/to/test_file.py>`."
 
 
-def agent_command(task, env_dir, model, arm, ws, work):
+def agent_command(task, env_dir, model, arm, ws, work, max_turns=MAX_TURNS):
     py = f"{env_dir}/bin/python"
     prompt = PROMPT.format(repo=task["repo"], problem=task["problem_statement"], py=py, how_to_test=how_to_test(task, py))
-    claude_args = ["--model", model, "--max-turns", str(MAX_TURNS), "--output-format", "json",
+    claude_args = ["--model", model, "--max-turns", str(max_turns), "--output-format", "json",
                    "--permission-mode", "acceptEdits", "--allowedTools", TOOLS, "-p", prompt]
     if arm == "bare":
         return ["claude"] + claude_args
@@ -105,14 +105,14 @@ def evaluate(task, ws, env_dir, patches):
     return outcome(task, out)
 
 
-def run_arm(task, arm, work, model, key):
+def run_arm(task, arm, work, model, key, max_turns=MAX_TURNS, tag=""):
     tid = task["instance_id"]
     repo_path = ensure_repo(work, task["repo"])
     env_dir = ensure_env(work, task)
-    patches = f"{work}/patches/{tid}"
+    patches = f"{work}/patches/{tid}" + (f"/{tag}" if tag else "")
     os.makedirs(patches, exist_ok=True)
     open(f"{patches}/test.patch", "w").write(task["test_patch"])
-    rec = {"id": tid, "repo": task["repo"], "arm": arm, "model": model}
+    rec = {"id": tid, "repo": task["repo"], "arm": arm, "model": model, "max_turns": max_turns, "tag": tag}
 
     ws = f"{work}/agent-ws/{arm}/{tid}"
     os.makedirs(os.path.dirname(ws), exist_ok=True)
@@ -123,7 +123,7 @@ def run_arm(task, arm, work, model, key):
     if arm == "foil":
         sh(f"{FOIL} abort {branch_name(task)}", cwd=ws, env=env, check=False)
 
-    rc, result, err, took = run_agent(agent_command(task, env_dir, model, arm, ws, work), ws, env)
+    rc, result, err, took = run_agent(agent_command(task, env_dir, model, arm, ws, work, max_turns), ws, env)
     open(f"{patches}/agent-{arm}.stderr", "w").write(err)
     open(f"{patches}/agent-{arm}.json", "w").write(json.dumps(result, indent=1))
     rec.update(agent_rc=rc, agent_s=round(took, 1), turns=result.get("num_turns"),
@@ -158,13 +158,15 @@ def main():
     ap.add_argument("stage1", help="stage-1 results.jsonl: only tasks whose gold fix resolves there run")
     ap.add_argument("--model", default="claude-haiku-4-5-20251001")
     ap.add_argument("--workers", type=int, default=2)
+    ap.add_argument("--max-turns", type=int, default=MAX_TURNS)
+    ap.add_argument("--tag", default="", help="a name for this run: results go to agent-results-TAG.jsonl")
     ap.add_argument("--only", nargs="*")
     args = ap.parse_args()
     key = open(os.path.expanduser("~/.secrets/anthropic_key")).read().strip()
     ok = {r["id"] for r in map(json.loads, open(args.stage1)) if r.get("baseline", {}).get("resolved")}
     tasks = [t for t in map(json.loads, open(args.lite)) if t["instance_id"] in (set(args.only) if args.only else ok)]
     args.work = os.path.abspath(args.work)
-    out_path = f"{args.work}/agent-results.jsonl"
+    out_path = f"{args.work}/agent-results{'-' + args.tag if args.tag else ''}.jsonl"
     done = set()
     if os.path.exists(out_path):
         done = {(r["id"], r["arm"]) for r in map(json.loads, open(out_path))}
@@ -175,7 +177,7 @@ def main():
     def one(job):
         task, arm = job
         try:
-            rec = run_arm(task, arm, args.work, args.model, key)
+            rec = run_arm(task, arm, args.work, args.model, key, args.max_turns, args.tag)
         except Exception as err:
             rec = {"id": task["instance_id"], "arm": arm, "harness_error": str(err)[-2000:]}
         with lock:

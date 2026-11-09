@@ -27,7 +27,7 @@ use std::ffi::{CString, OsStr};
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -186,6 +186,22 @@ impl Branch {
             .map_err(|err| io::Error::new(err.kind(), format!("can't pause branch {} ({}): {err}", self.name, freeze.display())))
     }
 
+    /// How far the wall clock was set back since the branch was made, if at
+    /// all: the drop in (wall clock - boot clock), which only changes when
+    /// the wall clock is set. Under 2 ms is read noise and ignored.
+    fn clock_set_back(&self) -> Option<std::time::Duration> {
+        let then: i128 = fs::read_to_string(self.dir.join("clock")).ok()?.trim().parse().ok()?;
+        let mut back = then - clock_offset();
+        if cfg!(debug_assertions) {
+            // Test builds: FOIL_TEST_CLOCK_SET_BACK_MS pretends it was.
+            if let Some(ms) = std::env::var("FOIL_TEST_CLOCK_SET_BACK_MS").ok().and_then(|v| v.parse::<i128>().ok()) {
+                back += ms * 1_000_000;
+            }
+        }
+        const NOISE: i128 = 2_000_000;
+        (back > NOISE).then(|| std::time::Duration::from_nanos((back + NOISE) as u64))
+    }
+
     /// When the branch was created; a workspace path changed after this may
     /// conflict with the branch's own change to it.
     fn created(&self) -> io::Result<SystemTime> {
@@ -306,12 +322,20 @@ impl Branch {
     /// tick, so a change made right after the branch can carry the very
     /// same time. The branch's own time is an exact one (see
     /// `build_branch`), so changes made before it are older.
+    ///
+    /// File times come from the wall clock, which can be set back (by NTP,
+    /// or a VM syncing with its host): then a change made after the branch
+    /// can carry an earlier time. If the clock was set back since the
+    /// branch was made (see `clock_set_back`), the line moves back as far,
+    /// so such a change still counts.
     pub fn conflicts(&self, all: bool) -> io::Result<Vec<PathBuf>> {
-        let created = self.created()?;
+        let created = self.created()? - self.clock_set_back().unwrap_or_default();
+        let recent = Recent::load(&self.dir.join("recent"));
         let mut conflicts = Vec::new();
         for change in self.changes(all)?.0 {
-            let changed_since = match self.workspace.join(&change.path).symlink_metadata() {
-                Ok(meta) => ctime(&meta) >= created,
+            let path = self.workspace.join(&change.path);
+            let changed_since = match path.symlink_metadata() {
+                Ok(meta) => ctime(&meta) >= created && !recent.unchanged(&change.path, &path, &meta),
                 // Gone now: deleted on both sides is no conflict; otherwise it is.
                 Err(_) => change.kind != ChangeKind::Deleted && change.kind != ChangeKind::Added,
             };
@@ -353,8 +377,16 @@ impl Branch {
                     let conflicts = self.conflicts(all)?;
                     if !conflicts.is_empty() {
                         let list: Vec<String> = conflicts.iter().map(|p| format!("  {}", p.display())).collect();
+                        let clock = match self.clock_set_back() {
+                            Some(back) => format!(
+                                "(the system clock was set back {} ms since the branch was made, so files \
+                                 changed up to that long before it count as changed since)\n",
+                                back.as_millis()
+                            ),
+                            None => String::new(),
+                        };
                         return Err(io::Error::other(format!(
-                            "branch {} changes files that also changed in {} since the branch was made:\n{}\n\
+                            "branch {} changes files that also changed in {} since the branch was made:\n{}\n{clock}\
                              review them, then use `foil commit --force {}` to overwrite, or `foil abort {}`",
                             self.name,
                             self.workspace.display(),
@@ -484,6 +516,8 @@ fn build_branch(dir: &Path, workspace: &Path) -> io::Result<()> {
     fs::create_dir(dir)?;
     fs::create_dir(dir.join("upper"))?;
     fs::create_dir(dir.join("work"))?;
+    // How the wall clock stands against the boot clock (see `clock_set_back`).
+    fs::write(dir.join("clock"), clock_offset().to_string())?;
     // Before Linux 6.13 every change is stamped by the coarse clock, so a
     // change made in the same tick just before the branch would carry the
     // branch's own time and look like a conflict. Start on a fresh tick
@@ -507,21 +541,137 @@ fn build_branch(dir: &Path, workspace: &Path) -> io::Result<()> {
     // write it again to give it an exact stamp, and wait (briefly) until the
     // coarse clock has caught up with it; then earlier changes are older and
     // later ones at or after it. If the coarse clock trails by more than
-    // 20 ms, keep the coarse stamp: never a missed conflict, at worst a
-    // false one.
+    // 20 ms, keep the coarse stamp (never a missed conflict) and record the
+    // files stamped since it (see `Recent`), so the ones changed just before
+    // the branch are not taken for conflicts.
     let coarse = fs::symlink_metadata(&marker)?.modified()?;
     fs::symlink_metadata(&marker)?;
     fs::write(&marker, workspace.as_os_str().as_bytes())?;
     let exact = fs::symlink_metadata(&marker)?.modified()?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(20);
+    if forced_fallback() {
+        // As if the coarse clock trailed by a whole second.
+        let coarse = coarse - std::time::Duration::from_secs(1);
+        Recent::record(workspace, coarse, &dir.join("recent"))?;
+        return set_mtime(&marker, coarse);
+    }
     while coarse_now() < exact {
         if std::time::Instant::now() > deadline {
-            // Too far behind: fall back to the coarse time.
+            // Too far behind: fall back to the coarse time, and remember
+            // what the files stamped since then looked like (see `Recent`),
+            // so a file changed just before the branch is not taken for a
+            // conflict.
+            Recent::record(workspace, coarse, &dir.join("recent"))?;
             return set_mtime(&marker, coarse);
         }
         std::thread::sleep(std::time::Duration::from_micros(200));
     }
     Ok(())
+}
+
+/// Test builds only: `FOIL_TEST_COARSE_FALLBACK=1` takes the fallback in
+/// `build_branch` as if the coarse clock trailed by more than 20 ms.
+fn forced_fallback() -> bool {
+    cfg!(debug_assertions) && std::env::var_os("FOIL_TEST_COARSE_FALLBACK").is_some()
+}
+
+/// Files in the workspace stamped at or after a branch's (coarse) time
+/// while the branch was being made, before anything could run in it: what
+/// kind of file each was, its inode, size and a hash of its content.
+///
+/// Only written when `build_branch` falls back to the coarse time. Then a
+/// file changed just *before* the branch can carry a stamp above the
+/// branch's own, and would look like a conflict. If such a file is, at
+/// commit, still the same file with the same content, nothing in it can be
+/// lost, so it is no conflict. Every file not recorded here (folders, files
+/// over 64 MiB, ones that could not be read) is judged by its time alone,
+/// as before: never a missed conflict.
+struct Recent(HashMap<PathBuf, u64>);
+
+impl Recent {
+    const MAX_FILE: u64 = 64 << 20;
+
+    fn record(workspace: &Path, since: SystemTime, out: &Path) -> io::Result<()> {
+        let mut bytes = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut stack = vec![PathBuf::new()];
+        while let Some(rel) = stack.pop() {
+            if std::time::Instant::now() > deadline {
+                break; // what was recorded is still right; the rest stays a conflict
+            }
+            let Ok(entries) = fs::read_dir(workspace.join(&rel)) else { continue };
+            for entry in entries.flatten() {
+                let rel = rel.join(entry.file_name());
+                let Ok(meta) = entry.path().symlink_metadata() else { continue };
+                if meta.is_dir() {
+                    stack.push(rel);
+                } else if ctime(&meta) >= since {
+                    if let Some(key) = Recent::key(&entry.path(), &meta) {
+                        bytes.extend_from_slice(format!("{key:016x}").as_bytes());
+                        bytes.extend_from_slice(rel.as_os_str().as_bytes());
+                        bytes.push(0);
+                    }
+                }
+            }
+        }
+        fs::write(out, bytes)
+    }
+
+    /// What the file is: type and permissions, inode, size and content
+    /// (or a symlink's target), hashed together. `None` when it can't tell.
+    fn key(path: &Path, meta: &fs::Metadata) -> Option<u64> {
+        let content = if meta.file_type().is_symlink() {
+            fs::read_link(path).ok()?.into_os_string().into_vec()
+        } else if meta.is_file() && meta.len() <= Recent::MAX_FILE {
+            fs::read(path).ok()?
+        } else {
+            return None;
+        };
+        let mut all = format!("{} {} {} ", meta.mode(), meta.ino(), meta.len()).into_bytes();
+        all.extend_from_slice(&content);
+        Some(fnv1a(&all))
+    }
+
+    fn load(path: &Path) -> Recent {
+        let mut map = HashMap::new();
+        for record in fs::read(path).unwrap_or_default().split(|&b| b == 0) {
+            if record.len() > 16 {
+                if let Some(key) = std::str::from_utf8(&record[..16]).ok().and_then(|k| u64::from_str_radix(k, 16).ok()) {
+                    map.insert(PathBuf::from(OsStr::from_bytes(&record[16..])), key);
+                }
+            }
+        }
+        Recent(map)
+    }
+
+    /// Whether `rel` is recorded and still the same file with the same content.
+    fn unchanged(&self, rel: &Path, path: &Path, meta: &fs::Metadata) -> bool {
+        self.0.get(rel).is_some_and(|&key| Recent::key(path, meta) == Some(key))
+    }
+}
+
+/// The wall clock minus the boot clock, in ns. It changes only when the
+/// wall clock is set (both run at the same rate, and the boot clock also
+/// counts suspend). Read as a tight pair, retried if the reads were far apart.
+fn clock_offset() -> i128 {
+    let read = |id| {
+        let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        // SAFETY: clock_gettime fills `ts`.
+        unsafe { libc::clock_gettime(id, &mut ts) };
+        i128::from(ts.tv_sec) * 1_000_000_000 + i128::from(ts.tv_nsec)
+    };
+    let mut best = None;
+    for _ in 0..10 {
+        let (b1, real, b2) = (read(libc::CLOCK_BOOTTIME), read(libc::CLOCK_REALTIME), read(libc::CLOCK_BOOTTIME));
+        let (gap, offset) = (b2 - b1, real - (b1 + b2) / 2);
+        if best.is_none_or(|(g, _)| gap < g) {
+            best = Some((gap, offset));
+        }
+        if gap < 100_000 {
+            break;
+        }
+    }
+    best.map_or(0, |(_, offset)| offset)
 }
 
 /// The kernel's coarse clock: the time file changes are usually stamped with.

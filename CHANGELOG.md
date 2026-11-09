@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+### Benchmarks
+
+- SWE-bench Verified with Opus 5.5, three runs: a mean of 42.0 / 50 under
+  `foil agent claude` (strict) vs 42.7 / 50 without; 150 / 150 commits went
+  through (`bench/swebench/RESULTS-OPUS.md`).
+
+### Fixed
+
+- **A wall clock set back no longer hides a conflict.** `foil commit`
+  judges "changed in the workspace since the branch was made" by file
+  times, which come from the wall clock. When NTP or a VM's host sync set
+  that clock back (seen in a Lima VM where chrony and the guest agent
+  stepped it back about 340 ms every 10 s under load), a change made after
+  the branch could carry an earlier time and be overwritten. Each branch
+  now records the wall clock against the boot clock; if the wall clock was
+  set back since, commit moves the line back as far and says so. Refusing
+  is the safe mistake.
+- **Fewer false conflicts when the coarse clock lags.** When the kernel's
+  coarse clock trails real time by more than 20 ms as a branch is made,
+  the branch keeps the coarse time, and a file changed just before it
+  looked changed since. The branch now records the files stamped in that
+  window (kind, inode, size, content hash); one that is still the same at
+  commit is no conflict.
+
 ## 0.5.0 — 2026-11-08
 
 Guardrails for running agents where it matters: keep secrets in the repo

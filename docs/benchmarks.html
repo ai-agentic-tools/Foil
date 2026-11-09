@@ -55,6 +55,16 @@
     <tr><td>Left after <code>kill -9</code> of the server</td><td>1 process</td><td>81–92 overlay mounts too</td><td><strong>nothing</strong></td></tr>
   </table></div>
   <p class="meta">On this host every <code>lite</code> run failed until we fixed three things (cgroup v1 limits on a cgroup v2 host, a dangling <code>resolv.conf</code> symlink, and <code>/tmp</code> being its own tmpfs), and each failure left mounts behind. The <code>lite</code> numbers above include those fixes.</p>
+
+  <h2>SWE-bench Verified: a real agent, with and without foil</h2>
+  <p>Claude Code (Opus 5.5) on 50 SWE-bench Verified tasks (Django and sympy), three runs per arm: bare <code>claude -p</code>, and <code>foil agent claude</code> in strict mode (no home contents, network only to api.anthropic.com through foil's proxy, which holds the key), then <code>foil commit</code>. Hidden tests run outside foil afterwards.</p>
+  <div class="table-wrap"><table>
+    <tr><th></th><th>run 1</th><th>run 2</th><th>run 3</th><th>mean</th></tr>
+    <tr><td>without foil</td><td>43 / 50</td><td>44 / 50</td><td>41 / 50</td><td>42.7</td></tr>
+    <tr><td>with foil (strict)</td><td>41 / 50</td><td>43 / 50</td><td>42 / 50</td><td><strong>42.0</strong></td></tr>
+  </table></div>
+  <p>The ranges overlap, and the median agent time was 17 s in both arms. Under foil, the real workspace stayed unchanged until commit in 150 of 150 runs, every commit succeeded, the API key never appeared in the agent's output, and nothing the agent tried was refused. Five tasks went unsolved in every run of both arms.</p>
+  <p class="meta">Measured 2026-11-08, same VM, foil 0.5.0 with PR #16, Claude Code 2.1.302, $29.57 in API cost. The VM's clock was stabilized for the run (one time service, not two); the <a href="https://github.com/ai-agentic-tools/Foil/blob/main/bench/swebench/RESULTS-OPUS.md">results</a> say how and why. Per-task outcomes and raw JSONL are there too.</p>
 </main>
 <footer>
   <a href="./">Foil</a> · Apache License 2.0 · <a href="https://github.com/ai-agentic-tools/Foil">GitHub</a>

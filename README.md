@@ -166,10 +166,12 @@ the copy.
 *Measured on Ubuntu 26.04, Linux 7.0, 4 vCPU VM. The branch cost does not
 grow with the workspace: nothing is copied until it is written.*
 
-The sandbox doesn't hold the agent back. On 50 SWE-bench Verified tasks,
-Claude Code (Haiku 4.5) solved 35 under `foil agent claude` in strict mode
-and 33 without foil, at about the same cost
-([results](bench/swebench/RESULTS-VERIFIED.md)).
+The sandbox doesn't hold the agent back. Over three runs of 50 SWE-bench
+Verified tasks, Claude Code (Opus 5.5) solved a mean of 42.0 under
+`foil agent claude` in strict mode (41–43) and 42.7 without foil (41–44), at
+about the same cost; all 150 sandboxed commits went through
+([results](bench/swebench/RESULTS-OPUS.md); an earlier single Haiku 4.5 run:
+[35 vs 33](bench/swebench/RESULTS-VERIFIED.md)).
 
 ## How foil compares
 
@@ -394,9 +396,12 @@ not a boundary against a determined attacker with a kernel exploit.
   see a commit half-done while it runs; if it stops half-way, `foil commit`
   finishes it.
 - **Conflicts are detected per path, not merged.** A conflicting commit is
-  refused; you choose to force it or abort. Detection uses change times: a
-  change made in the same instant just before the branch can be flagged
-  (the safe mistake); one made after is never missed.
+  refused; you choose to force it or abort. On Linux, detection uses change
+  times: a change made just before the branch can be flagged (the safe
+  mistake). If the wall clock is set back while a branch exists (NTP, or a
+  VM syncing with its host), commit widens the check by as much and says
+  so, so a later change is not missed; a VM whose clock keeps being set
+  back makes these refusals common, so fix its time sync.
 - **Renaming a folder inside a branch is a copy.** overlayfs answers a folder
   rename with "cross-device", so tools like `mv` copy and delete instead:
   slower for big folders, and it fails half-way on a folder whose owner

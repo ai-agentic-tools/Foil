@@ -70,7 +70,7 @@ Apply to ~/src/app? [c]ommit / [k]eep for later / [a]bort</code></pre>
 
   <h2>Tested by trying to break it</h2>
   <p>Each guarantee has a test that attacks it: read <code>~/.ssh</code>, read a hidden <code>.env</code> (directly, by renaming its folder, by unmounting the cover in a nested namespace), reach a host outside the list, find the API key anywhere in <code>/proc</code>, plant a git hook or a <code>.claude/settings.json</code>, widen the policy. CI runs them on every change, on Linux and macOS. The <a href="https://github.com/ai-agentic-tools/Foil/blob/main/SECURITY.md">threat model</a> says what foil does not promise, too.</p>
-  <p>On <a href="https://github.com/ai-agentic-tools/Foil/blob/main/bench/swebench/RESULTS-VERIFIED.md">SWE-bench Verified</a>, Claude Code under foil's strict sandbox solved 35 of 50 tasks against 33 of 50 without it: the guardrails didn't cost it anything.</p>
+  <p>On <a href="https://github.com/ai-agentic-tools/Foil/blob/main/bench/swebench/RESULTS-OPUS.md">SWE-bench Verified</a>, over three runs of 50 tasks, Claude Code (Opus 5.5) solved a mean of 42.0 under foil's strict sandbox (41–43) against 42.7 without it (41–44). The ranges overlap: the guardrails didn't cost anything we could measure, and all 150 sandboxed commits went through.</p>
 
   <h2 id="install">Install</h2>
 <pre><code>brew install ai-agentic-tools/tap/foil        # macOS or Linux

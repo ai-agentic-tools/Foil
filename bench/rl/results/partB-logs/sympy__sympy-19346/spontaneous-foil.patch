@@ -1,0 +1,33 @@
+foil: 437 paths ignored by .gitignore not shown (build output etc.); --all shows them
+--- a/sympy/printing/repr.py
++++ b/sympy/printing/repr.py
+@@ -250,6 +250,18 @@
+         else:
+             return "(%s)" % self.reprify(expr, ", ")
+ 
++    def _print_dict(self, expr):
++        if not expr:
++            return "{}"
++        items = ["%s: %s" % (self._print(k), self._print(v)) for k, v in expr.items()]
++        return "{%s}" % ", ".join(items)
++
++    def _print_set(self, expr):
++        if not expr:
++            return "set()"
++        items = [self._print(item) for item in expr]
++        return "{%s}" % ", ".join(items)
++
+     def _print_WildFunction(self, expr):
+         return "%s('%s')" % (expr.__class__.__name__, expr.name)
+ 
+--- a/sympy/printing/tests/test_repr.py
++++ b/sympy/printing/tests/test_repr.py
+@@ -323,7 +323,7 @@
+     from sympy import srepr
+     from sympy.abc import x, y, z
+     d = {}
+-    assert srepr(d) == "{}_x"
++    assert srepr(d) == "{}"
+     d = {x: y}
+     assert srepr(d) == "{Symbol('x'): Symbol('y')}"
+     d = {x: y, y: z}

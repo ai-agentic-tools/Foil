@@ -1,0 +1,32 @@
+Testing against Django installed in '/home/user/swe/rl/hb/ws/spontaneous-bare/django__django-16502/django'
+Importing application servers
+Found 5 test(s).
+Skipping setup of unused database(s): default, other.
+System check identified no issues (0 silenced).
+test_https (servers.test_basehttp.WSGIRequestHandlerTestCase.test_https) ... ok
+test_log_message (servers.test_basehttp.WSGIRequestHandlerTestCase.test_log_message) ... ok
+test_no_body_returned_for_head_requests (servers.test_basehttp.WSGIRequestHandlerTestCase.test_no_body_returned_for_head_requests) ... ERROR
+test_strips_underscore_headers (servers.test_basehttp.WSGIRequestHandlerTestCase.test_strips_underscore_headers)
+WSGIRequestHandler ignores headers containing underscores. ... ok
+test_broken_pipe_errors (servers.test_basehttp.WSGIServerTestCase.test_broken_pipe_errors)
+WSGIServer handles broken pipe errors. ... ok
+
+======================================================================
+ERROR: test_no_body_returned_for_head_requests (servers.test_basehttp.WSGIRequestHandlerTestCase.test_no_body_returned_for_head_requests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/user/swe/rl/hb/ws/spontaneous-bare/django__django-16502/tests/servers/test_basehttp.py", line 135, in test_no_body_returned_for_head_requests
+    with self.assertLogs("django.server", "INFO_x"):
+  File "/home/user/.local/share/uv/python/cpython-3.11.17-linux-x86_64-gnu/lib/python3.11/unittest/_log.py", line 50, in __enter__
+    handler.setLevel(self.level)
+  File "/home/user/.local/share/uv/python/cpython-3.11.17-linux-x86_64-gnu/lib/python3.11/logging/__init__.py", line 940, in setLevel
+    self.level = _checkLevel(level)
+                 ^^^^^^^^^^^^^^^^^^
+  File "/home/user/.local/share/uv/python/cpython-3.11.17-linux-x86_64-gnu/lib/python3.11/logging/__init__.py", line 207, in _checkLevel
+    raise ValueError("Unknown level: %r" % level)
+ValueError: Unknown level: 'INFO_x'
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.007s
+
+FAILED (errors=1)

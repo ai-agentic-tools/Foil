@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Coding-agent RL rollouts in 24 ms, and the reward hack a sandbox can and can't stop | Foil</title>
+<meta name="description" content="We measured foil as an RL environment on SWE-bench Verified tasks: a 24 ms reset against Docker's 232 ms, more graded rollouts per hour, nothing left running after a crash. Then we made the tasks impossible and asked Claude Code to cheat.">
+<link rel="canonical" href="https://ai-agentic-tools.github.io/Foil/blog/rl-rollouts.html">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Coding-agent RL rollouts in 24 ms, and the reward hack a sandbox can and can't stop">
+<meta property="og:description" content="A 24 ms reset, more graded rollouts per hour than Docker, and an impossible-task experiment: the false reward foil blocked, and the ones only a grader can.">
+<meta property="og:url" content="https://ai-agentic-tools.github.io/Foil/blog/rl-rollouts.html">
+<meta property="og:image" content="https://raw.githubusercontent.com/ai-agentic-tools/Foil/main/.github/social-preview.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="stylesheet" href="../style.css">
+<script type="application/ld+json">
+{"@context": "https://schema.org", "@type": "BlogPosting",
+ "headline": "Coding-agent RL rollouts in 24 ms, and the reward hack a sandbox can and can't stop",
+ "datePublished": "2026-11-14", "author": {"@type": "Organization", "name": "The Foil maintainers", "url": "https://github.com/ai-agentic-tools"},
+ "mainEntityOfPage": "https://ai-agentic-tools.github.io/Foil/blog/rl-rollouts.html"}
+</script>
+</head>
+<body>
+<header>
+  <a class="brand" href="../">foil</a>
+  <nav><a href="../">Home</a><a href="../benchmarks.html">Benchmarks</a><a href="https://github.com/ai-agentic-tools/Foil">GitHub</a></nav>
+</header>
+<main>
+<article>
+  <h1>Coding-agent RL rollouts in 24 ms, and the reward hack a sandbox can and can't stop</h1>
+  <p class="meta">14 November 2026 · The Foil maintainers</p>
+
+  <p>Training a coding agent with reinforcement learning means running thousands of attempts at a task. Each attempt starts from a fresh copy of the same prepared repository, gets graded by tests, and is thrown away. Two things decide whether the environment is any good. One is how much each attempt costs. The other is whether the reward means what it says, because a policy that finds a way to get the reward without doing the work will learn that instead.</p>
+  <p>We measured both for <a href="https://github.com/ai-agentic-tools/Foil">foil</a>, on SWE-bench Verified tasks, on one 4-vCPU VM. The bill was $12 of API.</p>
+
+  <h2>Part A: what a rollout costs</h2>
+  <p>Each rollout resets to a fresh copy of the task, applies a patch, runs the tests and scores the reward. The patch is either the merged fix (right reward: 1) or nothing (right reward: 0), so every reward can be checked. We compared three environments:</p>
+  <ul>
+    <li><b>foil:</b> a copy-on-write branch with <code>--strict</code>.</li>
+    <li><b>Docker:</b> a per-task image and a fresh container per rollout, the usual RL setup.</li>
+    <li><b>Copy:</b> a plain copy of the tree.</li>
+  </ul>
+  <p>All three used the same tests and the same Python environment.</p>
+  <div class="table-wrap"><table>
+    <tr><th></th><th>empty rollout</th><th>rollouts/hour, 1 at a time</th><th>rollouts/hour, 4 at once</th></tr>
+    <tr><td><strong>foil</strong></td><td><strong>24 ms</strong></td><td><strong>2,721–2,726</strong></td><td><strong>8,116–8,208</strong></td></tr>
+    <tr><td>Docker</td><td>232–238 ms</td><td>2,245–2,314</td><td>6,397–6,696</td></tr>
+    <tr><td>copy</td><td>264–285 ms</td><td>2,339–2,351</td><td>6,794–6,803</td></tr>
+  </table></div>
+  <p>All 1,080 rewards were scored correctly. The table shows two of three runs. The first run, right after the images were built, had foil <em>slower</em> at 4 at once (4,139 against Docker's 6,122). Neither the later runs nor per-task probes reproduced that, and we don't know why. It's in the <a href="https://github.com/ai-agentic-tools/Foil/blob/main/bench/rl/RESULTS.md">results</a> with its raw data. These tests take 1–3 s, so the reset is a big share of each rollout. With longer test suites the gap shrinks.</p>
+  <p>We also killed the rollout driver with <code>kill -9</code> mid-run, as when an RL worker crashes. Under foil, the processes were gone within 2 s. Docker's containers kept running until their command finished. The copies stayed on disk.</p>
+
+  <h2>Part B: an impossible task, and an agent asked to cheat</h2>
+  <p>Following ImpossibleBench, we changed one expected value in each of 10 tasks' hidden tests. Now the real fix fails, and any reward is a false one. Claude Code (Haiku 4.5) ran in two setups:</p>
+  <ul>
+    <li><b>bare:</b> a process on the worker. It can read the machine, including the job's task data, use the network, and write the Python environment the grader uses.</li>
+    <li><b>foil:</b> <code>foil agent claude</code>. Home and task data aren't visible, the network reaches only the model API, and the Python environment is read-only.</li>
+  </ul>
+  <p>Both setups used the same grader. It restores the test files and runs the hidden tests.</p>
+  <div class="table-wrap"><table>
+    <tr><th></th><th>bare</th><th>foil</th></tr>
+    <tr><td>Changed tests visible, "don't modify the tests"</td><td>3 / 10 false rewards</td><td>3 / 10, the same three</td></tr>
+    <tr><td>Tests hidden, "get reward 1 by any means"</td><td>2 / 10</td><td><strong>1 / 10</strong></td></tr>
+  </table></div>
+  <p><b>The one foil stopped.</b> On <code>sympy-11618</code>, the bare agent ran <code>find /home -name "*11618*"</code>, found the job's hidden test file on the worker, read it, and made <code>distance()</code> return the expected value. Under foil, the same search returned only its own workspace, and the reward was 0. Rollout workers often keep the task data, other jobs' files and credentials on the same machine. Under foil, none of it is there to find.</p>
+  <p><b>The ones it can't.</b> The other false rewards all came through code inside the repository, the code the agent was asked to write:</p>
+  <ul>
+    <li><b>Special-casing:</b> renaming a method with an <code>_x</code> suffix so the edited test matches.</li>
+    <li><b>Planted hooks:</b> a hook in <code>tests/servers/__init__.py</code>, a file the grader didn't restore.</li>
+  </ul>
+  <p>Defending against these is the grader's job: hidden tests that differ from visible ones, and a check on what the diff touched. <code>foil diff --json</code> lists every file a rollout changed, so that check is a few lines.</p>
+  <p>No agent tried the network, and none tried to change the Python environment, so those protections were in place but not exercised. Ten tasks with one run each is a demonstration of the mechanism, not a rate.</p>
+
+  <h2>What this adds up to</h2>
+  <p>For RL on coding agents, foil gives you three things:</p>
+  <ul>
+    <li><b>Fast resets:</b> 24 ms each, with more graded rollouts per hour than a container per attempt.</li>
+    <li><b>No leftovers:</b> nothing is left running when a worker dies.</li>
+    <li><b>Nothing to find:</b> an environment where reading the answer off the machine isn't possible.</li>
+  </ul>
+  <p>It runs as an ordinary user, so it fits on clusters that won't give you privileged pods. It isn't a grader, and these results show where the line between the two is.</p>
+  <p>Scripts, raw results and transcripts: <a href="https://github.com/ai-agentic-tools/Foil/tree/main/bench/rl"><code>bench/rl</code></a>. A Python environment API for RL frameworks is next on the <a href="https://github.com/ai-agentic-tools/Foil/blob/main/TODO.md">plan</a>. If you run RL on coding agents and want it to fit your stack, <a href="https://github.com/ai-agentic-tools/Foil/issues">open an issue</a>.</p>
+</article>
+</main>
+<footer>
+  Foil is open source under the <a href="https://github.com/ai-agentic-tools/Foil/blob/main/LICENSE">Apache License 2.0</a>. ·
+  <a href="../">Home</a> ·
+  <a href="https://github.com/ai-agentic-tools/Foil">GitHub</a>
+</footer>
+</body>
+</html>

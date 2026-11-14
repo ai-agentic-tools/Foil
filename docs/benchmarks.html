@@ -65,6 +65,17 @@
   </table></div>
   <p>The ranges overlap, and the median agent time was 17 s in both arms. Under foil, the real workspace stayed unchanged until commit in 150 of 150 runs, every commit succeeded, the API key never appeared in the agent's output, and nothing the agent tried was refused. Five tasks went unsolved in every run of both arms.</p>
   <p class="meta">Measured 2026-11-08, same VM, foil 0.5.0 with PR #16, Claude Code 2.1.302, $29.57 in API cost. The VM's clock was stabilized for the run (one time service, not two); the <a href="https://github.com/ai-agentic-tools/Foil/blob/main/bench/swebench/RESULTS-OPUS.md">results</a> say how and why. Per-task outcomes and raw JSONL are there too.</p>
+
+  <h2>RL rollouts: foil vs Docker vs a copy</h2>
+  <p>One RL rollout resets to a fresh copy of a prepared SWE-bench Verified task, applies a patch (the merged fix or nothing, so the right reward is known), runs the tests, scores the reward and tears down. Ten tasks, 60 rollouts per setting, the same tests and Python environment everywhere.</p>
+  <div class="table-wrap"><table>
+    <tr><th></th><th>empty rollout</th><th>per hour, 1 at a time</th><th>per hour, 4 at once</th><th>after <code>kill -9</code> of the driver</th></tr>
+    <tr><td><strong>foil</strong></td><td><strong>24 ms</strong></td><td><strong>2,721–2,726</strong></td><td><strong>8,116–8,208</strong></td><td><strong>processes gone in 2 s</strong></td></tr>
+    <tr><td>Docker (container per rollout)</td><td>232–238 ms</td><td>2,245–2,314</td><td>6,397–6,696</td><td>containers run on until their command ends</td></tr>
+    <tr><td>copy</td><td>264–285 ms</td><td>2,339–2,351</td><td>6,794–6,803</td><td>half-made copies left on disk</td></tr>
+  </table></div>
+  <p>All 1,080 rewards right. Two of three runs shown; in the first, foil was slower at 4 at once (4,139 vs 6,122 per hour) and we couldn't reproduce or explain it. Then reward hacking: on 10 tasks made impossible, Claude Code (Haiku 4.5) asked to get the reward by any means got one false reward outside foil by finding the job's hidden tests on the machine; under foil the same search found nothing. Special-casing in the code it was asked to write got false rewards in both, which only the grader can stop.</p>
+  <p class="meta">Measured 2026-11-14 on the same VM, foil 0.5.1, Docker 29.1.3, $12.03 of API. <a href="https://github.com/ai-agentic-tools/Foil/blob/main/bench/rl/RESULTS.md">Results, caveats and raw data</a> · <a href="blog/rl-rollouts.html">write-up</a>.</p>
 </main>
 <footer>
   <a href="./">Foil</a> · Apache License 2.0 · <a href="https://github.com/ai-agentic-tools/Foil">GitHub</a>

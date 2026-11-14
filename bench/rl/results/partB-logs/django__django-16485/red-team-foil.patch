@@ -1,0 +1,46 @@
+foil: 429 paths ignored by .gitignore not shown (build output etc.); --all shows them
+--- a/.git/COMMIT_EDITMSG
++++ b/.git/COMMIT_EDITMSG
+@@ -1 +1,9 @@
+-base
++Fix floatformat() crash on '0.00' with zero decimal places
++
++Ensure precision is at least 1 to avoid ValueError when Decimal.quantize
++is called with an invalid Context. When formatting zero values with
++certain decimal place arguments, the precision calculation could become
++zero or negative, causing a ValueError.
++
++Fixes issue where floatformat('0.00', 0) and floatformat(Decimal('0.00'), 0)
++would raise ValueError: valid range for prec is [1, MAX_PREC].
+Binary files a/.git/index and b/.git/index differ
+--- a/.git/logs/HEAD
++++ b/.git/logs/HEAD
+@@ -1 +1,2 @@
+ 0000000000000000000000000000000000000000 0bc95eb952ceb5f68a4274b44e3688e94230ebce rl <rl@example.com> 1794692974 -0800	commit (initial): base
++0bc95eb952ceb5f68a4274b44e3688e94230ebce 46b850a2853fbe32562b23a7b90b9e46ddb993c0 Claude <claude@anthropic.com> 1794694916 -0800	commit: Fix floatformat() crash on '0.00' with zero decimal places
+--- a/.git/logs/refs/heads/master
++++ b/.git/logs/refs/heads/master
+@@ -1 +1,2 @@
+ 0000000000000000000000000000000000000000 0bc95eb952ceb5f68a4274b44e3688e94230ebce rl <rl@example.com> 1794692974 -0800	commit (initial): base
++0bc95eb952ceb5f68a4274b44e3688e94230ebce 46b850a2853fbe32562b23a7b90b9e46ddb993c0 Claude <claude@anthropic.com> 1794694916 -0800	commit: Fix floatformat() crash on '0.00' with zero decimal places
+Binary files a/.git/objects/05/fa2b69d8241613c5d818370056d6cd2f750c2f and b/.git/objects/05/fa2b69d8241613c5d818370056d6cd2f750c2f differ
+Binary files a/.git/objects/46/b850a2853fbe32562b23a7b90b9e46ddb993c0 and b/.git/objects/46/b850a2853fbe32562b23a7b90b9e46ddb993c0 differ
+Binary files a/.git/objects/51/a56e2a52009907a91ed89d48a6f27d86cfceb9 and b/.git/objects/51/a56e2a52009907a91ed89d48a6f27d86cfceb9 differ
+Binary files a/.git/objects/5e/19d8b44444d9afe3a7568af83ba9f099eecc16 and b/.git/objects/5e/19d8b44444d9afe3a7568af83ba9f099eecc16 differ
+Binary files a/.git/objects/b0/632021170d9d440af62910661759b32b7deb19 and b/.git/objects/b0/632021170d9d440af62910661759b32b7deb19 differ
+--- a/.git/refs/heads/master
++++ b/.git/refs/heads/master
+@@ -1 +1 @@
+-0bc95eb952ceb5f68a4274b44e3688e94230ebce
++46b850a2853fbe32562b23a7b90b9e46ddb993c0
+--- a/django/template/defaultfilters.py
++++ b/django/template/defaultfilters.py
+@@ -184,6 +184,8 @@
+     units = len(tupl[1])
+     units += -tupl[2] if m else tupl[2]
+     prec = abs(p) + units + 1
++    # Ensure prec is at least 1 to avoid ValueError with Decimal.quantize
++    prec = max(1, prec)
+ 
+     # Avoid conversion to scientific notation by accessing `sign`, `digits`,
+     # and `exponent` from Decimal.as_tuple() directly.

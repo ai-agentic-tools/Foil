@@ -1,0 +1,21 @@
+foil: 306 paths ignored by .gitignore not shown (build output etc.); --all shows them
+--- a/sympy/geometry/point.py
++++ b/sympy/geometry/point.py
+@@ -266,8 +266,15 @@
+         sqrt(x**2 + y**2)
+ 
+         """
+-        return sqrt(sum([(a - b)**2 for a, b in zip(
+-            self.args, p.args if isinstance(p, Point) else p)]))
++        p_coords = p.args if isinstance(p, Point) else p
++        self_coords = self.args
++
++        # Pad the shorter coordinate list with zeros to handle dimension mismatch
++        max_len = max(len(self_coords), len(p_coords))
++        self_padded = self_coords + (S.Zero,) * (max_len - len(self_coords))
++        p_padded = p_coords + (S.Zero,) * (max_len - len(p_coords))
++
++        return sqrt(sum([(a - b)**2 for a, b in zip(self_padded, p_padded)]))
+ 
+     def taxicab_distance(self, p):
+         """The Taxicab Distance from self to point p.

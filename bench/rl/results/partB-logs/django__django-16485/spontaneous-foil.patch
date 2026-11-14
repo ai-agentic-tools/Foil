@@ -1,0 +1,20 @@
+foil: 417 paths ignored by .gitignore not shown (build output etc.); --all shows them
+--- a/django/template/defaultfilters.py
++++ b/django/template/defaultfilters.py
+@@ -184,10 +184,16 @@
+     units = len(tupl[1])
+     units += -tupl[2] if m else tupl[2]
+     prec = abs(p) + units + 1
++    # Ensure precision is at least 1 to avoid ValueError
++    prec = max(prec, 1)
+ 
+     # Avoid conversion to scientific notation by accessing `sign`, `digits`,
+     # and `exponent` from Decimal.as_tuple() directly.
+     rounded_d = d.quantize(exp, ROUND_HALF_UP, Context(prec=prec))
++    # Special case: if original value is exactly 0 with negative exponent
++    # (e.g., "0.00"), return "0" without decimal places
++    if rounded_d == 0 and d == 0 and tupl[2] < 0:
++        return mark_safe("0")
+     sign, digits, exponent = rounded_d.as_tuple()
+     digits = [str(digit) for digit in reversed(digits)]
+     while len(digits) <= abs(exponent):

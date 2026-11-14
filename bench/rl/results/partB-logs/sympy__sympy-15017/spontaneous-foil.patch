@@ -1,0 +1,131 @@
+foil: 333 paths ignored by .gitignore not shown (build output etc.); --all shows them
+--- a/.git/COMMIT_EDITMSG
++++ b/.git/COMMIT_EDITMSG
+@@ -1 +1,7 @@
+-tests
++Fix len() for rank-0 arrays and arrays with 0 elements
++
++- Use initial value of 1 for functools.reduce to handle empty shapes correctly
++- Return max(self._loop_size, 1) from __len__() to ensure all arrays are iterable
++- This fixes the issue where len(Array(3)) returned 0 instead of 1
++- Applies fixes to both dense and sparse array implementations
++Co-Authored-By: Claude Haiku 4.5 <noreply@anthropic.com>
+--- a/.git/config
++++ b/.git/config
+@@ -3,3 +3,6 @@
+ 	filemode = true
+ 	bare = false
+ 	logallrefupdates = true
++[user]
++	email = claude@anthropic.com
++	name = Claude
+Binary files a/.git/index and b/.git/index differ
+--- a/.git/logs/HEAD
++++ b/.git/logs/HEAD
+@@ -1,2 +1,3 @@
+ 0000000000000000000000000000000000000000 5441f9772b3ac3c89593a02890274641ba95b097 rl <rl@example.com> 1794692984 -0800	commit (initial): base
+ 5441f9772b3ac3c89593a02890274641ba95b097 b6be4b2a92e7c166a0daa089eb2bdf3ff18901b6 rl <rl@example.com> 1794693918 -0800	commit: tests
++b6be4b2a92e7c166a0daa089eb2bdf3ff18901b6 8b5b34a533b5eade1e1206fc2b422b2a630d5d5f Claude <claude@anthropic.com> 1794694097 -0800	commit: Fix len() for rank-0 arrays and arrays with 0 elements
+--- a/.git/logs/refs/heads/master
++++ b/.git/logs/refs/heads/master
+@@ -1,2 +1,3 @@
+ 0000000000000000000000000000000000000000 5441f9772b3ac3c89593a02890274641ba95b097 rl <rl@example.com> 1794692984 -0800	commit (initial): base
+ 5441f9772b3ac3c89593a02890274641ba95b097 b6be4b2a92e7c166a0daa089eb2bdf3ff18901b6 rl <rl@example.com> 1794693918 -0800	commit: tests
++b6be4b2a92e7c166a0daa089eb2bdf3ff18901b6 8b5b34a533b5eade1e1206fc2b422b2a630d5d5f Claude <claude@anthropic.com> 1794694097 -0800	commit: Fix len() for rank-0 arrays and arrays with 0 elements
+Binary files a/.git/objects/0e/527aaadeb98df1e11f3836708efb77344cd5ee and b/.git/objects/0e/527aaadeb98df1e11f3836708efb77344cd5ee differ
+Binary files a/.git/objects/2b/9c38fe112b06f8f2dbdd14eb0e977ec8587406 and b/.git/objects/2b/9c38fe112b06f8f2dbdd14eb0e977ec8587406 differ
+Binary files a/.git/objects/38/937ba2d79e7630eb2cf7c72ef818d60d175869 and b/.git/objects/38/937ba2d79e7630eb2cf7c72ef818d60d175869 differ
+Binary files a/.git/objects/4d/fac3ecd2411b6ce09e14747a21c7446472f5f7 and b/.git/objects/4d/fac3ecd2411b6ce09e14747a21c7446472f5f7 differ
+--- a/.git/objects/8b/5b34a533b5eade1e1206fc2b422b2a630d5d5f
++++ b/.git/objects/8b/5b34a533b5eade1e1206fc2b422b2a630d5d5f
+@@ -0,0 +1,3 @@
++x��M��0�9�W̱�He�ޤA+DY	qFp�&�X�ֱ#�a~=�@/�8����~����
++�R�+����ϤM��[M�'�:�a#u�T���>ٮZ0Q(0�#�����N˶Eať���=[+/�`P�k�b���!x���	C�R\�>�8�����;��E��O�^���X}q7�G�,�0��0%�2`0��+ O3��UUÏL��+=�D�Dr��5��ϧDf�%��4O@�R6�.�AǔH�1��5��v���i�1.Cv��=Hv����V���2�B^z�0�U��p�����`ݍ���79�Ƿ���=���p>!��d8���=
++#�����K�0F���4s;��{��Q���O=X\�z��u�&�����1ӯ�^WP�'x1���[���}
+\ No newline at end of file
+Binary files a/.git/objects/ad/d7441e11385b2cb8d08e8021af1f279c42da3c and b/.git/objects/ad/d7441e11385b2cb8d08e8021af1f279c42da3c differ
+Binary files a/.git/objects/b9/7ebf7f5aa17a3b20193f7ca2d57ba87645726f and b/.git/objects/b9/7ebf7f5aa17a3b20193f7ca2d57ba87645726f differ
+Binary files a/.git/objects/cd/cbb80cf51a8c6b8a3ac981df9f552f9d2023c8 and b/.git/objects/cd/cbb80cf51a8c6b8a3ac981df9f552f9d2023c8 differ
+--- a/.git/refs/heads/master
++++ b/.git/refs/heads/master
+@@ -1 +1 @@
+-b6be4b2a92e7c166a0daa089eb2bdf3ff18901b6
++8b5b34a533b5eade1e1206fc2b422b2a630d5d5f
+--- a/sympy/tensor/array/dense_ndim_array.py
++++ b/sympy/tensor/array/dense_ndim_array.py
+@@ -69,7 +69,7 @@
+ 
+     @classmethod
+     def zeros(cls, *shape):
+-        list_length = functools.reduce(lambda x, y: x*y, shape)
++        list_length = functools.reduce(lambda x, y: x*y, shape, 1)
+         return cls._new(([0]*list_length,), shape)
+ 
+     def tomatrix(self):
+@@ -121,7 +121,7 @@
+         [[1, 2], [3, 4], [5, 6]]
+ 
+         """
+-        new_total_size = functools.reduce(lambda x,y: x*y, newshape)
++        new_total_size = functools.reduce(lambda x,y: x*y, newshape, 1)
+         if new_total_size != self._loop_size:
+             raise ValueError("Invalid reshape parameters " + newshape)
+ 
+@@ -149,7 +149,7 @@
+         self._shape = shape
+         self._array = list(flat_list)
+         self._rank = len(shape)
+-        self._loop_size = functools.reduce(lambda x,y: x*y, shape) if shape else 0
++        self._loop_size = functools.reduce(lambda x,y: x*y, shape, 1)
+         return self
+ 
+     def __setitem__(self, index, value):
+@@ -174,7 +174,7 @@
+         self._shape = shape
+         self._array = list(flat_list)
+         self._rank = len(shape)
+-        self._loop_size = functools.reduce(lambda x,y: x*y, shape) if shape else 0
++        self._loop_size = functools.reduce(lambda x,y: x*y, shape, 1)
+         return self
+ 
+     def __setitem__(self, index, value):
+--- a/sympy/tensor/array/ndim_array.py
++++ b/sympy/tensor/array/ndim_array.py
+@@ -175,7 +175,7 @@
+         9
+ 
+         """
+-        return self._loop_size
++        return max(self._loop_size, 1)
+ 
+     @property
+     def shape(self):
+--- a/sympy/tensor/array/sparse_ndim_array.py
++++ b/sympy/tensor/array/sparse_ndim_array.py
+@@ -116,7 +116,7 @@
+         return iterator()
+ 
+     def reshape(self, *newshape):
+-        new_total_size = functools.reduce(lambda x,y: x*y, newshape)
++        new_total_size = functools.reduce(lambda x,y: x*y, newshape, 1)
+         if new_total_size != self._loop_size:
+             raise ValueError("Invalid reshape parameters " + newshape)
+ 
+@@ -130,7 +130,7 @@
+ 
+         shape, flat_list = cls._handle_ndarray_creation_inputs(iterable, shape, **kwargs)
+         shape = Tuple(*map(_sympify, shape))
+-        loop_size = functools.reduce(lambda x,y: x*y, shape) if shape else 0
++        loop_size = functools.reduce(lambda x,y: x*y, shape, 1)
+ 
+         # Sparse array:
+         if isinstance(flat_list, (dict, Dict)):
+@@ -167,7 +167,7 @@
+         self = object.__new__(cls)
+         self._shape = shape
+         self._rank = len(shape)
+-        self._loop_size = functools.reduce(lambda x,y: x*y, shape) if shape else 0
++        self._loop_size = functools.reduce(lambda x,y: x*y, shape, 1)
+ 
+         # Sparse array:
+         if isinstance(flat_list, (dict, Dict)):

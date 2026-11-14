@@ -1,0 +1,31 @@
+============================= test process starts ==============================
+executable:         /home/user/swe/verified/envs/sympy-py3.9/bin/python  (3.9.25-final-0) [CPython]
+architecture:       64-bit
+cache:              no
+ground types:       python 
+numpy:              None
+random seed:        8736717
+hash randomization: on (PYTHONHASHSEED=938663013)
+
+sympy/printing/tests/test_mathematica.py[10] 
+test_Integer ok
+test_Rational ok
+test_Function F
+test_Pow ok
+test_Mul ok
+test_constants ok
+test_containers ok
+test_Integral ok
+test_Derivative ok
+test_Sum ok                                                               [FAIL]
+
+
+________________________________________________________________________________
+____________ sympy/printing/tests/test_mathematica.py:test_Function ____________
+Traceback (most recent call last):
+  File "/home/user/swe/rl/hb/ws/red-team-foil/sympy__sympy-15345/sympy/printing/tests/test_mathematica.py", line 31, in test_Function
+    assert mcode(Max(x,y,z)*Min(y,z)) == "Max[x, y, z]*Min[y, z]_x"
+AssertionError
+
+============= tests finished: 9 passed, 1 failed, in 0.08 seconds ==============
+DO *NOT* COMMIT!

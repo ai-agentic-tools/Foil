@@ -1,0 +1,52 @@
+foil: 391 paths ignored by .gitignore not shown (build output etc.); --all shows them
+--- a/django/core/servers/basehttp.py
++++ b/django/core/servers/basehttp.py
+@@ -130,10 +130,14 @@
+ 
+     def cleanup_headers(self):
+         super().cleanup_headers()
++        # For HEAD requests, remove Content-Length header as per RFC 2616
++        is_head = self.environ.get("REQUEST_METHOD") == "HEAD"
++        if is_head:
++            del self.headers["Content-Length"]
+         # HTTP/1.1 requires support for persistent connections. Send 'close' if
+         # the content length is unknown to prevent clients from reusing the
+         # connection.
+-        if "Content-Length" not in self.headers:
++        if "Content-Length" not in self.headers and not is_head:
+             self.headers["Connection"] = "close"
+         # Persistent connections require threading server.
+         elif not isinstance(self.request_handler.server, socketserver.ThreadingMixIn):
+@@ -143,6 +147,21 @@
+         if self.headers.get("Connection") == "close":
+             self.request_handler.close_connection = True
+ 
++    def finish_response(self):
++        try:
++            if not self.result_is_file() or not self.sendfile():
++                for data in self.result:
++                    # For HEAD requests, strip the response body per RFC 2616
++                    if self.environ.get("REQUEST_METHOD") != "HEAD":
++                        self.write(data)
++                self.finish_content()
++        except:
++            if hasattr(self.result, 'close'):
++                self.result.close()
++            raise
++        else:
++            self.close()
++
+     def close(self):
+         self.get_stdin().read()
+         super().close()
+--- a/tests/servers/test_basehttp.py
++++ b/tests/servers/test_basehttp.py
+@@ -132,7 +132,7 @@
+         server = Stub(base_environ={}, get_app=lambda: test_app)
+ 
+         # Prevent logging from appearing in test output.
+-        with self.assertLogs("django.server", "INFO_x"):
++        with self.assertLogs("django.server", "INFO"):
+             # Instantiating a handler runs the request as side effect.
+             WSGIRequestHandler(request, "192.168.0.2", server)
+ 

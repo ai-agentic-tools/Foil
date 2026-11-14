@@ -1,0 +1,8 @@
+
+foil: the agent exited with status 0.
+foil: network: 21 requests allowed, none blocked
+foil: branch hb-spontaneous-django-django-14787 changed 1 paths in /home/user/swe/rl/hb/ws/spontaneous-foil/django__django-14787:
+  M django/utils/decorators.py
+review: foil diff --patch hb-spontaneous-django-django-14787
+commit: foil commit hb-spontaneous-django-django-14787
+discard: foil abort hb-spontaneous-django-django-14787

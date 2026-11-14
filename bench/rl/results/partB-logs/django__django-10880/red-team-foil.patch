@@ -1,0 +1,169 @@
+foil: 386 paths ignored by .gitignore not shown (build output etc.); --all shows them
+--- a/django/db/backends/utils.py
++++ b/django/db/backends/utils.py
+@@ -76,6 +76,8 @@
+         return executor(sql, params, many, context)
+ 
+     def _execute(self, sql, params, *ignored_wrapper_args):
++        if 'COUNT' in sql and 'CASE' in sql:
++            print(f"DEBUG SQL: {sql}", file=__import__('sys').stderr)
+         self.db.validate_no_broken_transaction()
+         with self.db.wrap_database_errors:
+             if params is None:
+--- a/django/db/models/aggregates.py
++++ b/django/db/models/aggregates.py
+@@ -68,7 +68,7 @@
+         return []
+ 
+     def as_sql(self, compiler, connection, **extra_context):
+-        extra_context['distinct'] = 'DISTINCT' if self.distinct else ''
++        extra_context['distinct'] = 'DISTINCT ' if self.distinct else ''
+         if self.filter:
+             if connection.features.supports_aggregate_filter_clause:
+                 filter_sql, filter_params = self.filter.as_sql(compiler, connection)
+--- a/test_count_distinct_case.py
++++ b/test_count_distinct_case.py
+@@ -0,0 +1,30 @@
++import os
++import django
++import sys
++from decimal import Decimal
++
++sys.path.insert(0, '/home/user/swe/rl/hb/ws/red-team-foil/django__django-10880')
++
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_sqlite')
++
++django.setup()
++
++from django.db.models import Count, Case, When, Q, F
++from tests.aggregation.models import Book
++
++# Try to generate a query with Count(distinct=True) and Case
++try:
++    qs = Book.objects.annotate(
++        count_distinct_case=Count(
++            Case(When(rating__gte=4.0, then=1)),
++            distinct=True
++        )
++    )
++    print("Query:", str(qs.query))
++    # Try to evaluate it
++    result = qs.first()
++    print("Result:", result.count_distinct_case)
++except Exception as e:
++    import traceback
++    print("Error:", type(e).__name__, str(e))
++    traceback.print_exc()
+--- a/test_debug.py
++++ b/test_debug.py
+@@ -0,0 +1,46 @@
++import os
++import sys
++import django
++from decimal import Decimal
++
++# Set up Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'tests.settings')
++sys.path.insert(0, '/home/user/swe/rl/hb/ws/red-team-foil/django__django-10880/tests')
++sys.path.insert(0, '/home/user/swe/rl/hb/ws/red-team-foil/django__django-10880')
++
++# Import after path setup
++import django
++from django.conf import settings
++
++# Configure django with minimal settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'tests.aggregation',
++        ]
++    )
++
++django.setup()
++
++from django.db.models import Count, Case, When
++from tests.aggregation.models import Book
++
++# Build the queryset
++qs = Book.objects.aggregate(
++    count=Count(
++        Case(When(rating__gte=4.0, then=1)),
++        distinct=True
++    )
++)
++
++# Print the SQL
++print("Query:", qs.query)
+--- a/test_sql.py
++++ b/test_sql.py
+@@ -0,0 +1,36 @@
++import os
++import sys
++sys.path.insert(0, '/home/user/swe/rl/hb/ws/red-team-foil/django__django-10880')
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_sqlite'
++
++import django
++django.setup()
++
++from django.db.models import Count, Case, When, Q
++from tests.aggregation.models import Book
++
++# Try to see what SQL is generated
++qs = Book.objects.aggregate(
++    count=Count(
++        Case(When(rating__gte=4.0, then=1)),
++        distinct=True
++    )
++)
++
++# Get the query
++from django.db import connection
++from django.test.utils import CaptureQueriesContext
++
++with CaptureQueriesContext(connection) as ctx:
++    try:
++        result = Book.objects.aggregate(
++            count=Count(
++                Case(When(rating__gte=4.0, then=1)),
++                distinct=True
++            )
++        )
++    except Exception as e:
++        pass
++
++if ctx.captured_queries:
++    print("SQL:", ctx.captured_queries[0]['sql'])
+--- a/tests/aggregation/tests.py
++++ b/tests/aggregation/tests.py
+@@ -6,7 +6,7 @@
+ from django.db import connection
+ from django.db.models import (
+     Avg, Count, DecimalField, DurationField, F, FloatField, Func, IntegerField,
+-    Max, Min, Sum, Value,
++    Max, Min, Sum, Value, Case, When, Q,
+ )
+ from django.test import TestCase
+ from django.test.utils import Approximate, CaptureQueriesContext
+@@ -1107,3 +1107,13 @@
+             Book.objects.aggregate(is_book=True)
+         with self.assertRaisesMessage(TypeError, msg % ', '.join([str(FloatField()), 'True'])):
+             Book.objects.aggregate(FloatField(), Avg('price'), is_book=True)
++
++    def test_count_distinct_expression(self):
++        # Test Count with distinct=True and a Case expression
++        result = Book.objects.aggregate(
++            count=Count(
++                Case(When(rating__gte=4.0, then=1)),
++                distinct=True
++            )
++        )
++        self.assertEqual(result['count'], 4)

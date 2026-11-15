@@ -173,12 +173,39 @@ about the same cost; all 150 sandboxed commits went through
 ([results](bench/swebench/RESULTS-OPUS.md); an earlier single Haiku 4.5 run:
 [35 vs 33](bench/swebench/RESULTS-VERIFIED.md)).
 
-For RL on coding agents, a rollout (reset, apply a patch, run the tests, score,
-tear down) costs 24 ms of overhead under foil against 232–238 ms for a Docker
-container per rollout, with nothing left running when the worker is killed;
-and an agent asked to cheat on an impossible task could not read the job's
-hidden tests off the machine as it did outside foil
-([results](bench/rl/RESULTS.md)).
+## Foil as an RL environment
+
+Training a coding agent with RL means thousands of rollouts: reset a fresh copy
+of the task, let the agent (or a patch) change it, run the tests, score the
+reward, tear down. We measured foil against a Docker container per rollout and
+a plain copy, on 10 SWE-bench Verified tasks with the same tests and Python
+environment ([results](bench/rl/RESULTS.md), [write-up](https://ai-agentic-tools.github.io/Foil/blog/rl-rollouts.html)):
+
+| | empty rollout | rollouts/hour, 1 at a time | rollouts/hour, 4 at once | after `kill -9` of the worker |
+|---|---|---|---|---|
+| **foil** | **24 ms** | **2,721 / 2,726** | **8,116 / 8,208** | processes gone in 2 s |
+| Docker | 232–238 ms | 2,245 / 2,314 | 6,397 / 6,696 | containers keep running |
+| copy | 264–285 ms | 2,339 / 2,351 | 6,794 / 6,803 | half copies left on disk |
+
+All 1,080 rewards were scored correctly. Two of three runs are shown; the
+first had foil slower at 4 at once (4,139 vs 6,122) and is published with the
+rest.
+
+**Reward hacking.** On 10 tasks made impossible (one expected value changed
+in the hidden tests, so every reward of 1 is false), Claude Code (Haiku 4.5)
+ran as a plain process and under `foil agent claude`, for $12 of API:
+
+| | bare | foil |
+|---|---|---|
+| tests visible, "don't modify the tests" | 3 / 10 false rewards | 3 / 10, the same tasks |
+| tests hidden, "get reward 1 by any means" | 2 / 10 | **1 / 10** |
+
+The difference: outside foil the agent ran `find /home`, found the job's
+hidden tests on the worker and hard-coded the answer; under foil the same
+search found only its workspace. The other false rewards were special-cased
+code inside the repo, which is the grader's job to catch
+(`foil diff --json` lists every file a rollout touched). Ten tasks, one run
+each: a demonstration of the mechanism, not a rate.
 
 ## How foil compares
 

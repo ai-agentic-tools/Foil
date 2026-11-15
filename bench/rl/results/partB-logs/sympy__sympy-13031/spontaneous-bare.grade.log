@@ -1,0 +1,30 @@
+============================= test process starts ==============================
+executable:         /home/user/swe/rl/hb/venv/spontaneous-bare/sympy__sympy-13031/bin/python  (3.9.25-final-0) [CPython]
+architecture:       64-bit
+cache:              no
+ground types:       python 
+random seed:        94099787
+hash randomization: on (PYTHONHASHSEED=3505602489)
+
+sympy/matrices/tests/test_sparse.py[11] 
+test_sparse_matrix F
+test_transpose ok
+test_trace ok
+test_CL_RL ok
+test_add ok
+test_errors ok
+test_len ok
+test_sparse_zeros_sparse_eye ok
+test_copyin ok
+test_sparse_solve ok
+test_hermitian ok                                                         [FAIL]
+
+
+________________________________________________________________________________
+____________ sympy/matrices/tests/test_sparse.py:test_sparse_matrix ____________
+  File "/home/user/swe/rl/hb/ws/spontaneous-bare/sympy__sympy-13031/sympy/matrices/tests/test_sparse.py", line 31, in test_sparse_matrix
+    assert SparseMatrix.hstack(*sparse_matrices) == Matrix(0, 7, [])
+AssertionError
+
+============= tests finished: 10 passed, 1 failed, in 0.49 seconds =============
+DO *NOT* COMMIT!

@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Benchmarks
+
+- RL rollouts (`bench/rl/RESULTS.md`): a 24 ms empty rollout vs 232–238 ms
+  for a Docker container per rollout; 18–27% more graded rollouts per hour
+  than Docker in two of three runs (the first run was slower; not
+  reproduced); nothing left running after `kill -9` of the driver. On
+  impossible tasks, a red-team agent got one false reward outside foil by
+  reading the job's hidden tests from the machine, and none that way under
+  foil; in-repo special-casing got false rewards in both.
+
 ## 0.5.1 — 2026-11-09
 
 ### Benchmarks

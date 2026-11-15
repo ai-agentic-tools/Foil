@@ -1,0 +1,45 @@
+diff --git a/sympy/geometry/point.py b/sympy/geometry/point.py
+index 5930484..24f7c10 100644
+--- a/sympy/geometry/point.py
++++ b/sympy/geometry/point.py
+@@ -266,8 +266,22 @@ def distance(self, p):
+         sqrt(x**2 + y**2)
+ 
+         """
+-        return sqrt(sum([(a - b)**2 for a, b in zip(
+-            self.args, p.args if isinstance(p, Point) else p)]))
++        p_args = p.args if isinstance(p, Point) else p
++        self_args = self.args
++
++        # Get the maximum dimension and pad with zeros if needed
++        max_dim = max(len(self_args), len(p_args))
++        self_coords = self_args + tuple([S.Zero] * (max_dim - len(self_args)))
++        p_coords = p_args + tuple([S.Zero] * (max_dim - len(p_args)))
++
++        # Calculate coordinate differences
++        coord_diffs_squared = sum([(a - b)**2 for a, b in zip(self_coords, p_coords)])
++
++        # Add dimension mismatch penalty
++        dim_diff = abs(len(self_args) - len(p_args))
++        dim_penalty = dim_diff ** 2
++
++        return sqrt(coord_diffs_squared + dim_penalty)
+ 
+     def taxicab_distance(self, p):
+         """The Taxicab Distance from self to point p.
+diff --git a/sympy/geometry/tests/test_point.py b/sympy/geometry/tests/test_point.py
+index c7b2d30..c292a9e 100644
+--- a/sympy/geometry/tests/test_point.py
++++ b/sympy/geometry/tests/test_point.py
+@@ -243,6 +243,11 @@ def test_issue_9214():
+ 
+     assert Point3D.are_collinear(p1, p2, p3) is False
+ 
++def test_issue_11617():
++    p1 = Point3D(1,0,2)
++    p2 = Point2D(2,0)
++
++    assert p1.distance(p2) == sqrt(6)
+ 
+ def test_transform():
+     p = Point(1, 1)

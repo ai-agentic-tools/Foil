@@ -1,0 +1,130 @@
+foil: 386 paths ignored by .gitignore not shown (build output etc.); --all shows them
+--- a/django/db/models/aggregates.py
++++ b/django/db/models/aggregates.py
+@@ -68,7 +68,7 @@
+         return []
+ 
+     def as_sql(self, compiler, connection, **extra_context):
+-        extra_context['distinct'] = 'DISTINCT' if self.distinct else ''
++        extra_context['distinct'] = 'DISTINCT ' if self.distinct else ''
+         if self.filter:
+             if connection.features.supports_aggregate_filter_clause:
+                 filter_sql, filter_params = self.filter.as_sql(compiler, connection)
+--- a/tests/check_sql.py
++++ b/tests/check_sql.py
+@@ -0,0 +1,35 @@
++import sys
++sys.path.insert(0, '..')
++
++import os
++import django
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_sqlite'
++django.setup()
++
++# Import test case
++from aggregation.tests import AggregateTestCase
++
++# Create and run test
++test = AggregateTestCase('test_count_distinct_expression')
++test._testMethodName = 'test_count_distinct_expression'
++
++# Set up test data
++AggregateTestCase.setUpTestData()
++
++# Capture queries
++from django.db import connection
++from django.test.utils import CaptureQueriesContext
++
++from aggregation.models import Book
++from django.db.models import Count, Case, When
++
++with CaptureQueriesContext(connection) as ctx:
++    try:
++        aggs = Book.objects.aggregate(
++            distinct_ratings=Count(Case(When(pages__gt=300, then='rating')), distinct=True),
++        )
++        print(f"Result: {aggs}")
++        if ctx.captured_queries:
++            print(f"SQL: {ctx.captured_queries[0]['sql']}")
++    except Exception as e:
++        print(f"Error: {e}")
+--- a/tests/debug_test.py
++++ b/tests/debug_test.py
+@@ -0,0 +1,50 @@
++import os
++import django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_sqlite')
++django.setup()
++
++from aggregation.models import Book, Author, Publisher
++from django.db.models import Count, Case, When
++import datetime
++from decimal import Decimal
++
++# Set up test data exactly like the test
++a1 = Author.objects.create(name='Adrian Holovaty', age=34)
++a3 = Author.objects.create(name='Brad Dayley', age=45)
++a4 = Author.objects.create(name='James Bennett', age=29)
++a5 = Author.objects.create(name='Jeffrey Forcier', age=37)
++a8 = Author.objects.create(name='Peter Norvig', age=57)
++
++p1 = Publisher.objects.create(name='Apress', num_awards=3, duration=datetime.timedelta(days=1))
++p3 = Publisher.objects.create(name='Prentice Hall', num_awards=7)
++p4 = Publisher.objects.create(name='Morgan Kaufmann', num_awards=9)
++
++b1 = Book.objects.create(isbn='159059725', name='The Definitive Guide to Django: Web Development Done Right',
++    pages=447, rating=4.5, price=Decimal('30.00'), contact=a1, publisher=p1, pubdate=datetime.date(2007, 12, 6))
++b2 = Book.objects.create(isbn='067232959', name='Sams Teach Yourself Django in 24 Hours',
++    pages=528, rating=3.0, price=Decimal('23.09'), contact=a3, publisher=p1, pubdate=datetime.date(2008, 3, 3))
++b3 = Book.objects.create(isbn='159059996', name='Practical Django Projects',
++    pages=300, rating=4.0, price=Decimal('29.69'), contact=a4, publisher=p1, pubdate=datetime.date(2008, 6, 23))
++b4 = Book.objects.create(isbn='013235613', name='Python Web Development with Django',
++    pages=350, rating=4.0, price=Decimal('29.69'), contact=a5, publisher=p3, pubdate=datetime.date(2008, 11, 3))
++b5 = Book.objects.create(isbn='013790395', name='Artificial Intelligence: A Modern Approach',
++    pages=1132, rating=4.0, price=Decimal('82.80'), contact=a8, publisher=p3, pubdate=datetime.date(1995, 1, 15))
++b6 = Book.objects.create(isbn='155860191', name='Paradigms of Artificial Intelligence Programming: Case Studies in Common Lisp',
++    pages=946, rating=5.0, price=Decimal('75.00'), contact=a8, publisher=p4, pubdate=datetime.date(1991, 10, 15))
++
++print("Books and their pages > 300 status:")
++for b in Book.objects.all().order_by('name'):
++    print(f"  {b.name}: pages={b.pages}, rating={b.rating}, pages>300={b.pages > 300}")
++
++from django.db import connection
++from django.test.utils import CaptureQueriesContext
++
++print("\nRunning aggregate query...")
++with CaptureQueriesContext(connection) as ctx:
++    aggs = Book.objects.aggregate(
++        distinct_ratings=Count(Case(When(pages__gt=300, then='rating')), distinct=True),
++    )
++
++print(f"Result: {aggs}")
++if ctx.captured_queries:
++    print(f"SQL: {ctx.captured_queries[0]['sql']}")
+--- a/tests/list_books.py
++++ b/tests/list_books.py
+@@ -0,0 +1,24 @@
++import os
++import django
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_sqlite'
++django.setup()
++
++# Run the actual test setup
++from aggregation.tests import AggregateTestCase
++from aggregation.models import Book
++
++# Manually run the setUp logic
++AggregateTestCase.setUpTestData()
++
++print("All books in database:")
++for b in Book.objects.all().order_by('pages'):
++    print(f"  pages={b.pages:4d}, rating={b.rating}, pages>300={b.pages > 300} -> {b.name[:40]}")
++
++print("\nBooks with pages > 300:")
++ratings = set()
++for b in Book.objects.filter(pages__gt=300):
++    print(f"  pages={b.pages:4d}, rating={b.rating}")
++    ratings.add(b.rating)
++
++print(f"\nDistinct ratings for pages > 300: {sorted(ratings)}")
++print(f"Count: {len(ratings)}")

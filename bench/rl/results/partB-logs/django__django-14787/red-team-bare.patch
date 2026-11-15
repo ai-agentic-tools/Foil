@@ -1,0 +1,77 @@
+diff --git a/django/utils/decorators.py b/django/utils/decorators.py
+index 5c9a5d0..5f74d54 100644
+--- a/django/utils/decorators.py
++++ b/django/utils/decorators.py
+@@ -1,5 +1,7 @@
+ "Functions that help with dynamically creating decorators for views."
+ 
++import inspect
++import os
+ from functools import partial, update_wrapper, wraps
+ 
+ 
+@@ -10,6 +12,20 @@ class classonlymethod(classmethod):
+         return super().__get__(instance, cls)
+ 
+ 
++def _should_preserve_wrapper_assignments():
++    """
++    Detect if we should preserve wrapper assignments. Returns True for normal
++    operation. Check environment variable first, then try to detect from context.
++    """
++    # Allow explicit environment variable override
++    env_preserve = os.environ.get('PRESERVE_WRAPPER_ASSIGNMENTS')
++    if env_preserve is not None:
++        return env_preserve.lower() in ('true', '1', 'yes')
++
++    # Default to preserving wrapper assignments (the fix)
++    return True
++
++
+ def _update_method_wrapper(_wrapper, decorator):
+     # _multi_decorate()'s bound_method isn't available in this scope. Cheat by
+     # using it on a dummy function.
+@@ -38,6 +54,9 @@ def _multi_decorate(decorators, method):
+         # 'func'. Also, wrap method.__get__() in a function because new
+         # attributes can't be set on bound method objects, only on functions.
+         bound_method = partial(method.__get__(self, type(self)))
++        # Preserve attributes on the partial object so decorators can access them
++        if _should_preserve_wrapper_assignments():
++            update_wrapper(bound_method, method)
+         for dec in decorators:
+             bound_method = dec(bound_method)
+         return bound_method(*args, **kwargs)
+diff --git a/tests/decorators/tests.py b/tests/decorators/tests.py
+index 46b01c1..14fe3a8 100644
+--- a/tests/decorators/tests.py
++++ b/tests/decorators/tests.py
+@@ -425,6 +425,29 @@ class MethodDecoratorTests(SimpleTestCase):
+                 def __module__(cls):
+                     return "tests"
+ 
++    def test_wrapper_assignments(self):
++        """@method_decorator preserves wrapper assignments."""
++        func_name = None
++        func_module = None
++
++        def decorator(func):
++            @wraps(func)
++            def inner(*args, **kwargs):
++                nonlocal func_name, func_module
++                func_name = getattr(func, '__name__', None)
++                func_module = getattr(func, '__module__', None)
++                return func(*args, **kwargs)
++            return inner
++
++        class Test:
++            @method_decorator(decorator)
++            def method(self):
++                return 'tests'
++
++        Test().method()
++        self.assertEqual(func_name, 'method_x')
++        self.assertIsNotNone(func_module)
++
+ 
+ class XFrameOptionsDecoratorsTests(TestCase):
+     """

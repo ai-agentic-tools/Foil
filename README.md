@@ -173,6 +173,13 @@ about the same cost; all 150 sandboxed commits went through
 ([results](bench/swebench/RESULTS-OPUS.md); an earlier single Haiku 4.5 run:
 [35 vs 33](bench/swebench/RESULTS-VERIFIED.md)).
 
+For RL on coding agents, a rollout (reset, apply a patch, run the tests, score,
+tear down) costs 24 ms of overhead under foil against 232–238 ms for a Docker
+container per rollout, with nothing left running when the worker is killed;
+and an agent asked to cheat on an impossible task could not read the job's
+hidden tests off the machine as it did outside foil
+([results](bench/rl/RESULTS.md)).
+
 ## How foil compares
 
 | | git worktree | Docker / dev container | Cloud sandbox (E2B, Daytona, OpenSandbox) | Agent's own sandbox mode | **foil** |
